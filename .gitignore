@@ -21,8 +21,7 @@ nosetests.xml
 *.log
 
 # Carpetas de datos / salida / estrategias (contenido ignorado, pero permitimos .gitkeep)
-strategies/*
-!/strategies/.gitkeep
+
 
 data/cache/*
 !/data/cache/.gitkeep
