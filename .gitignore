@@ -21,15 +21,18 @@ nosetests.xml
 *.log
 
 # Carpetas de datos / salida / estrategias (contenido ignorado, pero permitimos .gitkeep)
-/strategies/*
+strategies/*
 !/strategies/.gitkeep
 
-/data/*
-!/data/.gitkeep
-
-/output/*
+data/cache/*
+!/data/cache/.gitkeep
+indicators_pine
+output/*
 !/output/.gitkeep
 
+btc
+eth
+backups
 # Archivos de entorno y editores
 .vscode/
 .idea/
