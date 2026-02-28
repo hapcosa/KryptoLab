@@ -1,0 +1,7 @@
+/.venv
+.gitignore
+.venv
+/strategies/*
+!.gitkeep
+/data/*
+/output/*
