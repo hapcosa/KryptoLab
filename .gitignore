@@ -1,7 +1,39 @@
-/.venv
-.gitignore
-.venv
+# Entorno virtual
+.venv/
+venv/
+.env/
+
+# Archivos de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+*.cover
+htmlcov/
+nosetests.xml
+*.log
+
+# Carpetas de datos / salida / estrategias (contenido ignorado, pero permitimos .gitkeep)
 /strategies/*
-!.gitkeep
+!/strategies/.gitkeep
+
 /data/*
+!/data/.gitkeep
+
 /output/*
+!/output/.gitkeep
+
+# Archivos de entorno y editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
