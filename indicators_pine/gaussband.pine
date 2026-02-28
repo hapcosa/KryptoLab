@@ -1,0 +1,417 @@
+//@version=5
+indicator("Volatility Gaussian Bands + Targets [BigBeluga]",
+         overlay          = true,
+         max_labels_count = 500,
+         max_lines_count  = 500)
+
+// ===========================
+// ======= INPUTS ============
+// ===========================
+int    len         = input.int(20,   "Length",          minval=5,                 group="Gaussian")
+string mode        = input.string("AVG", "Type",        ["AVG","MEADIAN","MODE"], group="Gaussian")
+float  distance    = input.float(1,  "Distance",        step=0.1,                 group="Gaussian")
+bool   show_retest = input.bool(false,"Retest Signals",                            group="Gaussian")
+color  up          = input.color(color.rgb(40,218,150),                            group="Color")
+color  dn          = input.color(#287bda,                                          group="Color")
+
+int   pivLen      = input.int(5,    "Pivot Length",   minval=2, maxval=15,  group="Targets")
+int   obLen       = input.int(10,   "OB Length (SL)", minval=3,             group="Targets")
+int   atrLen      = input.int(14,   "ATR Length",                           group="Targets")
+float atrSlBuf    = input.float(0.3,"SL Buffer ATR",  minval=0.1, step=0.1, group="Targets")
+int   lineExt     = input.int(15,   "Line Extend",    minval=3, maxval=50,  group="Targets")
+bool  showLiq     = input.bool(true,"Show BSL/SSL",                         group="Targets")
+// ▼ NUEVO: un solo botón para todos los targets
+bool  showTargets = input.bool(true,"Mostrar Targets",                      group="Targets")
+
+// ===========================
+// ======= GAUSSIAN FILTER ===
+// ===========================
+gaussian_filter(src, length, sigma) =>
+    var float[] weights = array.new_float(100)
+    float total = 0.0
+    float pi    = math.pi
+    for i = 0 to length - 1
+        float weight = math.exp(-0.5 * math.pow((i - length / 2) / sigma, 2.0)) / math.sqrt(sigma * 2.0 * pi)
+        weights.set(i, weight)
+        total := total + weight
+    for i = 0 to length - 1
+        weights.set(i, weights.get(i) / total)
+    float sum = 0.0
+    for i = 0 to length - 1
+        sum := sum + src[i] * weights.get(i)
+    sum
+
+// ===========================
+// ======= MULTI TREND =======
+// ===========================
+multi_trend(src, period) =>
+    array<float> g_value    = array.new<float>()
+    float        volatility = ta.sma(high - low, 100)
+    var float lower_band = 0.0
+    var float upper_band = 0.0
+    var float trend_line = 0.0
+    var bool  trend      = na
+
+    for step = 0 to 20 by 1
+        g_value.push(gaussian_filter(src, (period + step), 10))
+
+    float coeff = 0.05
+    float score = 0.0
+    for i = 0 to g_value.size() - 1
+        if g_value.get(i) > g_value.first()
+            score += coeff
+
+    color clr = score > 0.5
+         ? color.from_gradient(score, 0.5, 1, na, dn)
+         : color.from_gradient(score, 0, 0.5, up, na)
+
+    float value = switch mode
+        "AVG"     => g_value.avg()
+        "MEADIAN" => g_value.median()
+        "MODE"    => g_value.mode()
+
+    lower_band := value - volatility * distance
+    upper_band := value + volatility * distance
+
+    if ta.crossover(close, upper_band)
+        trend := true
+    if ta.crossunder(close, lower_band)
+        trend := false
+
+    trend_line := trend ? lower_band : not trend ? upper_band : na
+
+    [score, value, clr, trend_line, trend]
+
+[score, avg, clr, trend_line, trend] = multi_trend(close, len)
+
+// ===========================
+// === SEÑALES GAUSSIAN ======
+// ===========================
+bool long_signal  = ta.crossover(close, trend_line)
+bool short_signal = ta.crossunder(close, trend_line)
+bool retest_long  = show_retest and ta.crossover(close, avg) and trend
+bool retest_short = show_retest and ta.crossunder(high, avg) and not trend
+
+// ===========================
+// === ATR + OB ==============
+// ===========================
+float atr = ta.atr(atrLen)
+float obH = ta.highest(high, obLen)[1]
+float obL = ta.lowest(low,   obLen)[1]
+
+// ===========================
+// === BSL / SSL =============
+// ===========================
+float ph = ta.pivothigh(high, pivLen, pivLen)
+float pl = ta.pivotlow(low,   pivLen, pivLen)
+
+var float[] bslArr = array.new_float(0)
+var float[] sslArr = array.new_float(0)
+
+if not na(ph)
+    array.push(bslArr, ph)
+    if array.size(bslArr) > 40
+        array.shift(bslArr)
+if not na(pl)
+    array.push(sslArr, pl)
+    if array.size(sslArr) > 40
+        array.shift(sslArr)
+
+if array.size(bslArr) > 0
+    int i = 0
+    while i < array.size(bslArr)
+        if high >= array.get(bslArr, i)
+            array.remove(bslArr, i)
+        else
+            i += 1
+
+if array.size(sslArr) > 0
+    int i = 0
+    while i < array.size(sslArr)
+        if low <= array.get(sslArr, i)
+            array.remove(sslArr, i)
+        else
+            i += 1
+
+float bsl1 = na
+float ssl1 = na
+
+if array.size(bslArr) > 0
+    array.sort(bslArr, order.ascending)
+    for i = 0 to array.size(bslArr) - 1
+        float lvl = array.get(bslArr, i)
+        if lvl > high
+            bsl1 := lvl
+            break
+
+if array.size(sslArr) > 0
+    array.sort(sslArr, order.descending)
+    for i = 0 to array.size(sslArr) - 1
+        float lvl = array.get(sslArr, i)
+        if lvl < low
+            ssl1 := lvl
+            break
+
+float h1h = request.security(syminfo.tickerid, "60",  high[1], lookahead=barmerge.lookahead_on)
+float h1l = request.security(syminfo.tickerid, "60",  low[1],  lookahead=barmerge.lookahead_on)
+float h4h = request.security(syminfo.tickerid, "240", high[1], lookahead=barmerge.lookahead_on)
+float h4l = request.security(syminfo.tickerid, "240", low[1],  lookahead=barmerge.lookahead_on)
+float pdh  = request.security(syminfo.tickerid, "D",  high[1], lookahead=barmerge.lookahead_on)
+float pdl  = request.security(syminfo.tickerid, "D",  low[1],  lookahead=barmerge.lookahead_on)
+
+// ===========================
+// ======= TP/SL STATE =======
+// ===========================
+var float entryPrice = 0.0
+var float trailSL    = 0.0
+var float be         = 0.0
+var float tpm        = 0.0
+var float t2         = 0.0
+var float t3         = 0.0
+var float t4         = 0.0
+var float t5         = 0.0
+var int   entryBar   = 0
+var int   trailStage = 0
+var bool  bull       = true
+
+if long_signal
+    float ent  = close
+    float _sl  = obL - atr * atrSlBuf
+    float risk = math.max(ent - _sl, atr * 0.5)
+    entryPrice  := ent
+    trailSL     := _sl
+    trailStage  := 0
+    bull        := true
+    be   := ent
+    tpm  := not na(bsl1) and bsl1 > ent + risk * 0.3 ? bsl1 : ent + risk * 0.8
+    t2   := h1h > tpm + risk * 0.3 ? h1h : tpm + risk * 1.5
+    t3   := h4h > t2  + risk * 0.3 ? h4h : t2  + risk * 2.0
+    t4   := pdh > t3  + risk * 0.3 ? pdh : t3  + risk * 2.5
+    t5   := t4  + risk * 4.0
+    entryBar := bar_index
+
+if short_signal
+    float ent  = close
+    float _sl  = obH + atr * atrSlBuf
+    float risk = math.max(_sl - ent, atr * 0.5)
+    entryPrice  := ent
+    trailSL     := _sl
+    trailStage  := 0
+    bull        := false
+    be   := ent
+    tpm  := not na(ssl1) and ssl1 < ent - risk * 0.3 ? ssl1 : ent - risk * 0.8
+    t2   := h1l < tpm - risk * 0.3 ? h1l : tpm - risk * 1.5
+    t3   := h4l < t2  - risk * 0.3 ? h4l : t2  - risk * 2.0
+    t4   := pdl < t3  - risk * 0.3 ? pdl : t3  - risk * 2.5
+    t5   := t4  - risk * 4.0
+    entryBar := bar_index
+
+// ===========================
+// === HIT + TRAILING SL =====
+// ===========================
+var bool hitTPM = false
+var bool hitT2  = false
+var bool hitT3  = false
+var bool hitT4  = false
+var bool hitT5  = false
+
+if long_signal or short_signal
+    hitTPM := false
+    hitT2  := false
+    hitT3  := false
+    hitT4  := false
+    hitT5  := false
+
+bool active = entryBar > 0
+
+bool touchTPM = active and not hitTPM and (bull ? high >= tpm : low <= tpm)
+bool touchT2  = active and not hitT2  and (bull ? high >= t2  : low <= t2)
+bool touchT3  = active and not hitT3  and (bull ? high >= t3  : low <= t3)
+bool touchT4  = active and not hitT4  and (bull ? high >= t4  : low <= t4)
+bool touchT5  = active and not hitT5  and (bull ? high >= t5  : low <= t5)
+
+if touchTPM
+    hitTPM     := true
+    trailSL    := be
+    trailStage := 1
+if touchT2
+    hitT2      := true
+    trailSL    := tpm
+    trailStage := 2
+if touchT3
+    hitT3      := true
+    trailSL    := t2
+    trailStage := 3
+if touchT4
+    hitT4      := true
+    trailSL    := t3
+    trailStage := 4
+if touchT5
+    hitT5      := true
+    trailSL    := t4
+    trailStage := 5
+
+// ===========================
+// === HELPER LABEL ==========
+// ===========================
+f_lbl(int x, float y, string nm, float price, float ent, color bg) =>
+    float pct  = (price - ent) / ent * 100
+    string s   = pct >= 0 ? "+" : ""
+    string txt = nm + " → " + str.tostring(price, "#.####") +
+                 "  (" + s + str.tostring(pct, "#.##") + "%)"
+    label.new(x, y, txt,
+         style=label.style_label_left, color=bg,
+         textcolor=color.white, size=size.tiny)
+
+// ===========================
+// === COLORES FIJOS =========
+// ▼ Un solo color por nivel, igual para long y short
+// ===========================
+color cSL  = #E53935
+color cBE  = #1565C0
+color cTPM = #1b5e20
+color cT2  = #2e7d32
+color cT3  = #388e3c
+color cT4  = #43a047
+color cT5  = #66bb6a
+
+int lEnd = bar_index + lineExt
+
+var line  lSL  = na
+var line  lBE  = na
+var line  lTPM = na
+var line  lT2  = na
+var line  lT3  = na
+var line  lT4  = na
+var line  lT5  = na
+var label lbSL  = na
+var label lbBE  = na
+var label lbTPM = na
+var label lbT2  = na
+var label lbT3  = na
+var label lbT4  = na
+var label lbT5  = na
+
+// ▼ showTargets controla TODO de una vez
+if active and showTargets
+    line.delete(lSL),  lSL  := line.new(bar_index, trailSL, lEnd, trailSL, color=color.new(cSL,  10), style=line.style_solid,  width=2)
+    line.delete(lBE),  lBE  := line.new(bar_index, be,      lEnd, be,      color=color.new(cBE,  20), style=line.style_dotted, width=1)
+    line.delete(lTPM), lTPM := line.new(bar_index, tpm,     lEnd, tpm,     color=color.new(cTPM, 20), style=line.style_dashed, width=2)
+    line.delete(lT2),  lT2  := line.new(bar_index, t2,      lEnd, t2,      color=color.new(cT2,  20), style=line.style_dashed, width=1)
+    line.delete(lT3),  lT3  := line.new(bar_index, t3,      lEnd, t3,      color=color.new(cT3,  20), style=line.style_dashed, width=1)
+    line.delete(lT4),  lT4  := line.new(bar_index, t4,      lEnd, t4,      color=color.new(cT4,  20), style=line.style_dashed, width=1)
+    line.delete(lT5),  lT5  := line.new(bar_index, t5,      lEnd, t5,      color=color.new(cT5,  20), style=line.style_solid,  width=1)
+
+    label.delete(lbSL),  lbSL  := f_lbl(lEnd, trailSL, "SL",                           trailSL, entryPrice, cSL)
+    label.delete(lbBE),  lbBE  := f_lbl(lEnd, be,      "BE",                            be,      entryPrice, cBE)
+    label.delete(lbTPM), lbTPM := f_lbl(lEnd, tpm,     hitTPM ? "✅ TP·MIN" : "TP·MIN", tpm,     entryPrice, cTPM)
+    label.delete(lbT2),  lbT2  := f_lbl(lEnd, t2,      hitT2  ? "✅ T2·1H"  : "T2·1H",  t2,      entryPrice, cT2)
+    label.delete(lbT3),  lbT3  := f_lbl(lEnd, t3,      hitT3  ? "✅ T3·4H"  : "T3·4H",  t3,      entryPrice, cT3)
+    label.delete(lbT4),  lbT4  := f_lbl(lEnd, t4,      hitT4  ? "✅ T4·D"   : "T4·D",   t4,      entryPrice, cT4)
+    label.delete(lbT5),  lbT5  := f_lbl(lEnd, t5,      hitT5  ? "✅ T5·ext" : "T5·ext", t5,      entryPrice, cT5)
+else
+    line.delete(lSL),  line.delete(lBE),  line.delete(lTPM)
+    line.delete(lT2),  line.delete(lT3),  line.delete(lT4),  line.delete(lT5)
+    label.delete(lbSL),  label.delete(lbBE),  label.delete(lbTPM)
+    label.delete(lbT2),  label.delete(lbT3),  label.delete(lbT4), label.delete(lbT5)
+
+// ===========================
+// === BSL/SSL VISUAL ========
+// ===========================
+var line  liqBSL1  = na
+var line  liqSSL1  = na
+var label lbBSL1   = na
+var label lbSSL1   = na
+var float prevBSL1 = na
+var float prevSSL1 = na
+
+if showLiq
+    if bsl1 != prevBSL1
+        prevBSL1 := bsl1
+        line.delete(liqBSL1)
+        label.delete(lbBSL1)
+        if not na(bsl1)
+            liqBSL1 := line.new(bar_index - 15, bsl1, bar_index + lineExt, bsl1,
+                         color=color.new(up, 40), style=line.style_dotted, width=1)
+            lbBSL1  := label.new(bar_index + lineExt, bsl1, "BSL",
+                         style=label.style_label_left,
+                         color=color.new(up, 70), textcolor=up, size=size.tiny)
+    if ssl1 != prevSSL1
+        prevSSL1 := ssl1
+        line.delete(liqSSL1)
+        label.delete(lbSSL1)
+        if not na(ssl1)
+            liqSSL1 := line.new(bar_index - 15, ssl1, bar_index + lineExt, ssl1,
+                         color=color.new(dn, 40), style=line.style_dotted, width=1)
+            lbSSL1  := label.new(bar_index + lineExt, ssl1, "SSL",
+                         style=label.style_label_left,
+                         color=color.new(dn, 70), textcolor=dn, size=size.tiny)
+
+// ===========================
+// ======= GAUSSIAN VISUALS ==
+// ===========================
+p2 = plot(avg, color=clr, linewidth=1)
+p1 = plot(ta.change(trend) ? na : trend_line,
+         color     = close > trend_line ? up : dn,
+         linewidth = 2,
+         style     = plot.style_linebr)
+plot(trend_line,
+     color     = close > trend_line ? up : dn,
+     linewidth = 1,
+     style     = plot.style_linebr)
+
+color trend_color = trend ? color.new(up, 80) : color.new(dn, 80)
+fill(p1, p2, trend_line, avg, trend_color, na)
+
+if short_signal
+    label.new(bar_index, trend_line, score < 0.5 ? "▼+" : "▼",
+             color=dn, textcolor=chart.fg_color,
+             style=label.style_label_lower_right,
+             size=score < 0.5 ? size.small : size.tiny)
+if long_signal
+    label.new(bar_index, trend_line, score > 0.5 ? "▲+" : "▲",
+             color=up, textcolor=chart.bg_color,
+             style=label.style_label_upper_right,
+             size=score > 0.5 ? size.small : size.tiny)
+if retest_short
+    label.new(bar_index[1], high[1], "▼",
+             color=color(na), style=label.style_label_down,
+             textcolor=chart.fg_color, size=size.small)
+if retest_long
+    label.new(bar_index[1], low[1], "▲",
+             color=color(na), style=label.style_label_up,
+             textcolor=chart.fg_color, size=size.small)
+
+float score_up = (score - 1) * -1
+float score_dn = 1 - score_up
+
+if barstate.islast
+    table trend_strength_up = table.new(position.bottom_center, 100, 100)
+    table trend_strength_dn = table.new(position.top_center, 100, 100)
+    for i = 0 to score_up * 20
+        trend_strength_up.cell(0 + i, 0, bgcolor=color.new(up, 100 - i * 5),
+             text=i == 0 ? "|" : "", text_color=color.gray)
+        if i == score_up * 20
+            trend_strength_up.cell(0 + i, 0,
+                 text=str.tostring(score_up * 100, format.percent) + " ▲",
+                 text_color=chart.fg_color, height=2)
+    for i = 0 to score_dn * 20
+        trend_strength_dn.cell(0 + i, 0, bgcolor=color.new(dn, 100 - i * 5),
+             text=i == 0 ? "|" : "", text_color=color.gray)
+        if i == score_dn * 20
+            trend_strength_dn.cell(0 + i, 0,
+                 text=str.tostring(score_dn * 100, format.percent) + " ▼",
+                 text_color=chart.fg_color, height=2)
+
+// ===========================
+// ======= ALERTAS ===========
+// ===========================
+alertcondition(long_signal,  "Long ▲",    "▲ LONG | {{ticker}} @ {{close}} | {{interval}}")
+alertcondition(short_signal, "Short ▼",   "▼ SHORT | {{ticker}} @ {{close}} | {{interval}}")
+alertcondition(touchTPM,     "✅ TP·MIN", "✅ TP·MIN | {{ticker}} @ {{close}}")
+alertcondition(touchT2,      "✅ T2·1H",  "✅ T2·1H | {{ticker}} @ {{close}}")
+alertcondition(touchT3,      "✅ T3·4H",  "✅ T3·4H | {{ticker}} @ {{close}}")
+alertcondition(touchT4,      "✅ T4·D",   "✅ T4·D | {{ticker}} @ {{close}}")
+alertcondition(touchT5,      "✅ T5·ext", "✅ T5·ext | {{ticker}} @ {{close}}")
+alertcondition(retest_long,  "Retest ▲",  "🔵 Retest alcista | {{ticker}} @ {{close}}")
+alertcondition(retest_short, "Retest ▼",  "🔵 Retest bajista | {{ticker}} @ {{close}}")

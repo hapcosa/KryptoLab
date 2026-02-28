@@ -1,0 +1,62 @@
+# CryptoLab Engine — Global Configuration
+
+engine:
+  initial_capital: 300.0
+  risk_per_trade: 0.05        # 5% of capital per trade
+  max_positions: 1
+  slippage: 0.0001            # 0.01% slippage
+
+data:
+  cache_dir: "./data/cache"
+  default_provider: "bitget"
+  
+bitget:
+  api_key: ""
+  api_secret: ""
+  passphrase: ""
+
+# Market-specific overrides
+markets:
+  crypto_perpetual:
+    fee_maker: 0.0002
+    fee_taker: 0.0006
+    funding_interval_hours: 8
+    max_leverage: 125
+  
+  stock_perpetual:
+    fee_maker: 0.0002
+    fee_taker: 0.0006
+    funding_interval_hours: 4
+    max_leverage: 25
+
+# Default optimization settings
+optimizer:
+  method: "bayesian"          # bayesian, grid, genetic
+  n_trials: 500
+  n_jobs: -1                  # parallel
+  timeout: 3600               # 1 hour max
+  
+  anti_overfit:
+    walk_forward_splits: 5
+    walk_forward_train_ratio: 0.7
+    min_wfa_efficiency: 0.3
+    min_deflated_sharpe: 0.5
+    monte_carlo_permutations: 1000
+    monte_carlo_p_threshold: 0.05
+
+# Default ML target settings  
+ml_targets:
+  - metric: win_rate
+    period: weekly
+    threshold: 55
+    consistency: 0.7
+  
+  - metric: profit
+    period: monthly
+    threshold: 3.0
+    consistency: 0.75
+  
+  - metric: max_drawdown
+    period: daily
+    threshold: -3.0
+    consistency: 0.9
