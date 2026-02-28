@@ -70,7 +70,7 @@ class CyberCycleStrategy(IStrategy):
             ParamDef('use_htf', 'bool', False),
 
             # ── Risk params ──────────────────────────────────────────
-            ParamDef('leverage',    'float', 15.0, 5.0, 40.0, 3.0),
+            ParamDef('leverage',    'float', 15.0, 1.0, 25.0, 5.0),
             ParamDef('sl_atr_mult', 'float', 1.5, 0.5,  4.0, 0.1),
 
             # TP1 / TP2 — R:R multipliers sobre la distancia al SL
@@ -97,6 +97,12 @@ class CyberCycleStrategy(IStrategy):
             #   True  → cierra posición actual y abre la nueva (reversal)
             #   False → ignora la señal nueva, deja correr la posición
             ParamDef('close_on_signal', 'bool', True),
+
+            # ── Max signals per day ──────────────────────────────────
+            # Hard cap on new signals per calendar day.
+            # 0 = unlimited. 1-2 recommended for 1h timeframe.
+            # Prevents overtrading in choppy conditions.
+            ParamDef('max_signals_per_day', 'int', 0, 0, 5),
         ]
 
     def calculate_indicators(self, data: dict) -> dict:
@@ -360,6 +366,7 @@ class CyberCycleStrategy(IStrategy):
             trailing_distance=trailing_distance,
             metadata={
                 'close_on_signal': self.get_param('close_on_signal', True),
+                'max_signals_per_day': self.get_param('max_signals_per_day', 0),
                 'alpha_method':  self.get_param('alpha_method'),
                 'alpha':         ind['alpha'][idx],
                 'period':        ind['period'][idx],

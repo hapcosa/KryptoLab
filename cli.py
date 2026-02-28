@@ -250,6 +250,29 @@ def cmd_backtest(args):
     # Print report
     print(format_result(result))
 
+    # Monthly breakdown
+    try:
+        from optimize.grid_search import compute_monthly_stats
+        ms = compute_monthly_stats(result.trades)
+        if ms['n_months'] >= 2:
+            print(f"\n  📅 MONTHLY BREAKDOWN")
+            print(f"  {'─' * 60}")
+            for m in ms['months']:
+                icon = '✅' if m['pnl_pct'] >= 0 else '❌'
+                bar = '█' * max(1, int(abs(m['pnl_pct']) / 3))
+                sign = '+' if m['pnl_pct'] >= 0 else ''
+                print(f"  {m['year']}-{m['month']:02d}  {sign}{m['pnl_pct']:>6.1f}%  "
+                      f"{m['n_trades']:>3}t  WR={m['win_rate']:>4.0f}%  "
+                      f"{icon} {'▓' if m['pnl_pct']>=0 else '░'}{bar}")
+            print(f"  {'─' * 60}")
+            print(f"  Avg: {ms['avg_monthly_return']:+.1f}%/mo | "
+                  f"Positive: {ms['pct_positive']:.0f}% | "
+                  f"mSR: {ms['monthly_sharpe']:.2f} | "
+                  f"Best: {ms['best_month']:+.1f}% | "
+                  f"Worst: {ms['worst_month']:+.1f}%")
+    except Exception:
+        pass
+
     # Save trade log
     trade_df = result_to_dataframe(result)
     if len(trade_df) > 0:
@@ -1151,6 +1174,7 @@ def main():
 ║    --params-file PATH      Load params from JSON file        ║
 ║    --objective  STR        sharpe|return|calmar|composite    ║
 ║                           monthly|monthly_robust            ║
+║                           weekly|weekly_robust              ║
 ║    --method     STR        grid|bayesian|genetic             ║
 ║    --targets    STR        conservative|aggressive|consistency║
 ║    --n-trials   INT        Trials for bayesian (default 100) ║

@@ -143,6 +143,68 @@ def compute_monthly_stats(trades) -> dict:
     }
 
 
+def compute_weekly_stats(trades) -> dict:
+    """
+    Compute per-week PnL and consistency metrics.
+    Uses ISO week numbers for grouping.
+    """
+    if not trades:
+        return {'weeks': [], 'weekly_returns': [], 'pct_positive': 0,
+                'worst_week': 0, 'best_week': 0, 'weekly_sharpe': 0,
+                'avg_weekly_return': 0, 'n_weeks': 0}
+
+    weekly = defaultdict(list)
+    for t in trades:
+        ts = getattr(t, 'exit_time', 0)
+        if ts > 1e9:
+            dt = datetime.utcfromtimestamp(ts / 1000 if ts > 1e12 else ts)
+        else:
+            dt = datetime(2024, 1, 1)
+        iso_year, iso_week, _ = dt.isocalendar()
+        key = (iso_year, iso_week)
+        weekly[key].append(t)
+
+    weeks_data = []
+    weekly_rets = []
+    for (y, w), week_trades in sorted(weekly.items()):
+        total_pnl = sum(t.net_pnl for t in week_trades)
+        n = len(week_trades)
+        wins = sum(1 for t in week_trades if t.net_pnl > 0)
+        wr = (wins / n * 100) if n > 0 else 0
+
+        avg_size = np.mean([abs(t.size) for t in week_trades]) if week_trades else 1
+        pnl_pct = (total_pnl / avg_size * 100) if avg_size > 0 else 0
+
+        weeks_data.append({
+            'year': y, 'week': w,
+            'pnl': total_pnl,
+            'pnl_pct': pnl_pct,
+            'n_trades': n,
+            'win_rate': wr,
+        })
+        weekly_rets.append(pnl_pct)
+
+    weekly_rets = np.array(weekly_rets)
+    n_weeks = len(weekly_rets)
+    pos_weeks = np.sum(weekly_rets > 0)
+    pct_positive = (pos_weeks / n_weeks * 100) if n_weeks > 0 else 0
+
+    avg_ret = np.mean(weekly_rets) if n_weeks > 0 else 0
+    std_ret = np.std(weekly_rets) if n_weeks > 1 else 1
+    weekly_sharpe = (avg_ret / std_ret) if std_ret > 0 else 0
+
+    return {
+        'weeks': weeks_data,
+        'weekly_returns': weekly_rets.tolist(),
+        'pct_positive': pct_positive,
+        'worst_week': float(np.min(weekly_rets)) if n_weeks > 0 else 0,
+        'best_week': float(np.max(weekly_rets)) if n_weeks > 0 else 0,
+        'weekly_sharpe': weekly_sharpe,
+        'avg_weekly_return': avg_ret,
+        'n_weeks': n_weeks,
+    }
+
+
 def objective_monthly(result) -> float:
     """
     Monthly consistency objective.
@@ -247,6 +309,71 @@ def objective_monthly_robust(result) -> float:
     return score
 
 
+def objective_weekly(result) -> float:
+    """
+    Weekly consistency objective.
+    Like monthly but at weekly granularity — stricter test.
+    Requires min 4 weeks, min 1 trade/week.
+    """
+    ws = compute_weekly_stats(result.trades)
+
+    if ws['n_weeks'] < 4:
+        return -999.0
+
+    weekly_sr = ws['weekly_sharpe']
+    pct_pos = ws['pct_positive'] / 100.0
+
+    worst_penalty = 1.0 + min(0, ws['worst_week']) / 50.0
+    worst_penalty = max(0.1, worst_penalty)
+
+    wr = result.win_rate / 100.0
+
+    trades_per_week = result.n_trades / max(1, ws['n_weeks'])
+    if trades_per_week < 1:
+        return -999.0
+
+    score = weekly_sr * pct_pos * worst_penalty * (0.5 + 0.5 * wr)
+    return score
+
+
+def objective_weekly_robust(result) -> float:
+    """
+    Weekly consistency + robustness constraints.
+    Hard gates: WR >= 40%, PF >= 1.0, leverage penalty, DD penalty.
+    """
+    if result.win_rate < 40.0:
+        return -999.0
+    if result.profit_factor < 1.0:
+        return -999.0
+
+    ws = compute_weekly_stats(result.trades)
+    if ws['n_weeks'] < 4:
+        return -999.0
+
+    trades_per_week = result.n_trades / max(1, ws['n_weeks'])
+    if trades_per_week < 1:
+        return -999.0
+
+    weekly_sr = ws['weekly_sharpe']
+    pct_pos = ws['pct_positive'] / 100.0
+    worst_penalty = 1.0 + min(0, ws['worst_week']) / 50.0
+    worst_penalty = max(0.1, worst_penalty)
+
+    wr = result.win_rate / 100.0
+    wr_factor = 0.5 + 0.5 * min(1.0, (wr - 0.4) / 0.6)
+
+    lev = result.params.get('leverage', 1.0) if hasattr(result, 'params') else 1.0
+    lev_factor = 1.0 if lev <= 15 else max(0.3, 1.0 - (lev - 15) / 30.0)
+
+    dd = abs(result.max_drawdown)
+    dd_factor = 1.0 if dd <= 15 else max(0.2, 1.0 - (dd - 15) / 35.0)
+
+    pf_bonus = min(1.5, result.profit_factor / 2.0) if result.profit_factor > 0 else 0.5
+
+    score = weekly_sr * pct_pos * worst_penalty * wr_factor * lev_factor * dd_factor * pf_bonus
+    return score
+
+
 OBJECTIVES = {
     'sharpe': objective_sharpe,
     'return': objective_return,
@@ -254,6 +381,8 @@ OBJECTIVES = {
     'composite': objective_composite,
     'monthly': objective_monthly,
     'monthly_robust': objective_monthly_robust,
+    'weekly': objective_weekly,
+    'weekly_robust': objective_weekly_robust,
 }
 
 

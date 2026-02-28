@@ -161,6 +161,7 @@ class BacktestEngine:
         self._equity: List[float] = []
         self._trade_counter = 0
         self._detail_data: Optional[dict] = None
+        self._daily_signal_count: Dict[tuple, int] = {}  # (y,m,d) → count
 
     def set_detail_data(self, detail_data: dict, detail_tf: str):
         """
@@ -229,6 +230,22 @@ class BacktestEngine:
 
             # 3. Generate new signal (+ close-on-opposite-signal)
             signal = strategy.generate_signal(indicators, i, data)
+
+            # Daily signal limit: skip if max reached for this day
+            if signal is not None:
+                max_daily = signal.metadata.get('max_signals_per_day', 0)
+                if max_daily > 0:
+                    ts = bar.get('timestamp', i)
+                    if ts > 1e9:
+                        dt = datetime.utcfromtimestamp(ts / 1000 if ts > 1e12 else ts)
+                        day_key = (dt.year, dt.month, dt.day)
+                    else:
+                        day_key = i // 24  # ~24 bars/day for 1h
+                    count = self._daily_signal_count.get(day_key, 0)
+                    if count >= max_daily:
+                        signal = None  # Daily limit reached
+                    else:
+                        self._daily_signal_count[day_key] = count + 1
 
             if signal is not None:
                 if len(self._positions) < self.max_positions:
