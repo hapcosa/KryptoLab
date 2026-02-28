@@ -609,6 +609,23 @@ def cmd_optimize(args):
     data, detail_info, symbol, tf = _load_data(args)
     engine_factory = _make_engine_factory(capital, detail_info)
 
+    # ── Parallel setup ──
+    n_jobs_raw = args.get('n_jobs', 1)
+    try:
+        from optimize.parallel import get_n_jobs, detect_hardware
+        n_jobs = get_n_jobs(n_jobs_raw)
+    except ImportError:
+        n_jobs = 1
+
+    # Build engine_config for parallel workers (serializable, no closures)
+    _detail = detail_info or {'data': None, 'tf': None}
+    engine_config = {
+        'capital': capital,
+        'market_config': None,
+        'detail_data': _detail.get('data'),
+        'detail_tf': _detail.get('tf'),
+    }
+
     method_labels = {
         'grid': 'Grid Search',
         'bayesian': 'Bayesian (Optuna TPE)',
@@ -623,6 +640,18 @@ def cmd_optimize(args):
         print(f"   Leverage: {leverage}x")
     if param_subset:
         print(f"   Params: {', '.join(param_subset)} ({len(param_subset)} of {len(strategy.parameter_defs())})")
+
+    # Show parallel info
+    if n_jobs > 1:
+        try:
+            hw = detect_hardware()
+            cpu_str = f"{hw['cpu_name']}" if hw['cpu_name'] != 'Unknown' else ''
+            gpu_str = f" | GPU: {hw['gpu_name']} ({hw['gpu_vram']})" if hw.get('gpu_name') else ''
+            print(f"   ⚡ Parallel: {n_jobs} workers / {hw['cpu_count']} cores{gpu_str}")
+            if cpu_str:
+                print(f"   CPU: {cpu_str}")
+        except Exception:
+            print(f"   ⚡ Parallel: {n_jobs} workers")
     print()
 
     # ── Run optimization (Ctrl+C safe) ──────────────────────────
@@ -648,12 +677,14 @@ def cmd_optimize(args):
                 optimizer = BayesianOptimizer(
                     n_trials=n_trials,
                     objective=objective,
+                    n_jobs=n_jobs,
                     verbose=True,
                 )
                 result = optimizer.run(
                     strategy, data, engine_factory,
                     symbol=symbol, timeframe=tf,
                     param_subset=param_subset,
+                    engine_config=engine_config,
                 )
                 if result and result.param_importances:
                     extra_json['param_importances'] = result.param_importances
@@ -700,10 +731,11 @@ def cmd_optimize(args):
             else:
                 param_grid = _build_validation_grid(strategy)
 
-            optimizer = GridSearchOptimizer(objective=objective, verbose=True)
+            optimizer = GridSearchOptimizer(objective=objective, n_jobs=n_jobs, verbose=True)
             result = optimizer.run_with_validation(
                 strategy, data, engine_factory,
                 param_grid, symbol=symbol, timeframe=tf,
+                engine_config=engine_config,
             )
 
     except KeyboardInterrupt:
@@ -1178,6 +1210,7 @@ def main():
 ║    --method     STR        grid|bayesian|genetic             ║
 ║    --targets    STR        conservative|aggressive|consistency║
 ║    --n-trials   INT        Trials for bayesian (default 100) ║
+║    --n-jobs     INT        Parallel workers (-1=auto, 1=seq) ║
 ║    --optimize-params STR   Params to optimize (comma-sep)    ║
 ║    --trial   INT          Pick trial from top 10 (1-10)     ║
 ║                                                              ║
@@ -1259,6 +1292,9 @@ def main():
             i += 2
         elif arg == '--n-trials':
             args['n_trials'] = int(sys.argv[i + 1])
+            i += 2
+        elif arg == '--n-jobs':
+            args['n_jobs'] = int(sys.argv[i + 1])
             i += 2
         elif arg == '--optimize-params':
             args['optimize_params'] = sys.argv[i + 1]

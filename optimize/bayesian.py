@@ -74,6 +74,7 @@ class BayesianOptimizer:
                  timeout_seconds: Optional[int] = None,
                  pruning: bool = True,
                  seed: int = 42,
+                 n_jobs: int = 1,
                  verbose: bool = True):
         """
         Args:
@@ -83,6 +84,7 @@ class BayesianOptimizer:
             timeout_seconds: Max wall time (None = unlimited)
             pruning: Enable median pruner
             seed: Random seed for reproducibility
+            n_jobs: Parallel workers (1=sequential, -1=auto)
             verbose: Print progress
         """
         if not HAS_OPTUNA:
@@ -94,6 +96,7 @@ class BayesianOptimizer:
         self.timeout = timeout_seconds
         self.pruning = pruning
         self.seed = seed
+        self.n_jobs = n_jobs
         self.verbose = verbose
         self.last_result = None  # Stores partial result for Ctrl+C recovery
 
@@ -216,7 +219,8 @@ class BayesianOptimizer:
             symbol: str = "",
             timeframe: str = "",
             param_subset: Optional[List[str]] = None,
-            warm_start: Optional[List[Dict[str, Any]]] = None
+            warm_start: Optional[List[Dict[str, Any]]] = None,
+            engine_config: dict = None
             ) -> BayesianResult:
         """
         Execute Bayesian optimization.
@@ -224,15 +228,29 @@ class BayesianOptimizer:
         Args:
             strategy: IStrategy instance
             data: Full OHLCV data dict
-            engine_factory: Callable returning BacktestEngine
+            engine_factory: Callable returning BacktestEngine (used if n_jobs=1)
             symbol: For reporting
             timeframe: For reporting
             param_subset: Only optimize these params (None = all)
             warm_start: List of param dicts to seed the optimizer
+            engine_config: For parallel execution (n_jobs > 1)
 
         Returns:
             BayesianResult with ranked trials and importances
         """
+        if self.n_jobs > 1 and engine_config is not None:
+            return self._run_parallel(
+                strategy, data, engine_factory, symbol, timeframe,
+                param_subset, warm_start, engine_config)
+        else:
+            return self._run_sequential(
+                strategy, data, engine_factory, symbol, timeframe,
+                param_subset, warm_start)
+
+    def _run_sequential(self,
+                         strategy, data, engine_factory,
+                         symbol, timeframe, param_subset, warm_start):
+        """Original sequential optimization."""
         t0 = time.time()
         param_defs = strategy.parameter_defs()
         all_trials = []
@@ -267,20 +285,25 @@ class BayesianOptimizer:
                 study.enqueue_trial(ws_params)
 
         def _objective(trial):
-            params = self._build_search_space(trial, param_defs, param_subset)
+            optimized_params = self._build_search_space(trial, param_defs, param_subset)
 
             strat = copy.deepcopy(strategy)
-            strat.set_params(params)
+            strat.set_params(optimized_params)
 
             engine = engine_factory()
             result = engine.run(strat, data, symbol, timeframe)
 
             obj_val = self._compute_objective(result)
 
-            # Store trial info
+            # Full snapshot: defaults + phase1 (from loaded strategy) + phase2 (optimized)
+            # This ensures ALL params persist across optimization phases
+            full_params = strat.default_params()
+            full_params.update(strat.params)
+
+            # Store trial info with FULL params
             bt = BayesianTrial(
                 trial_id=trial.number,
-                params=params,
+                params=full_params,
                 sharpe_ratio=result.sharpe_ratio,
                 total_return=result.total_return,
                 max_drawdown=result.max_drawdown,
@@ -303,11 +326,11 @@ class BayesianOptimizer:
                 # Compact param display — only show optimized params
                 if param_subset:
                     p_disp = {k: (f'{v:.2f}' if isinstance(v, float) else str(v))
-                              for k, v in params.items() if k in param_subset}
+                              for k, v in optimized_params.items() if k in param_subset}
                 else:
                     # Show top 4 most changed params
                     p_disp = {k: (f'{v:.2f}' if isinstance(v, float) else str(v))
-                              for k, v in list(params.items())[:4]}
+                              for k, v in list(optimized_params.items())[:4]}
 
                 params_str = str(p_disp).replace("'", "")
                 print(f"  {marker}{n:>4}/{self.n_trials} "
@@ -387,6 +410,198 @@ class BayesianOptimizer:
 
         return result
 
+    def _run_parallel(self,
+                       strategy, data, engine_factory,
+                       symbol, timeframe, param_subset,
+                       warm_start, engine_config):
+        """
+        Parallel Bayesian optimization using batch ask/tell.
+
+        Flow per batch:
+          1. Main process: study.ask() × batch_size → trials
+          2. Main process: build_search_space() for each → param dicts (fast)
+          3. Worker pool: evaluate_trial() in parallel (slow - this is the win)
+          4. Main process: study.tell() with results
+        """
+        from optimize.parallel import setup_workers, evaluate_trial, cleanup_workers, create_pool
+
+        t0 = time.time()
+        param_defs = strategy.parameter_defs()
+        all_trials = []
+        batch_size = self.n_jobs
+
+        if self.verbose:
+            n_params = len(param_subset) if param_subset else len(param_defs)
+            n_method = len(self.ALL_METHOD_PARAMS)
+            n_effective = n_params - n_method + max(len(v) for v in self.ALPHA_METHOD_PARAMS.values())
+            print(f"\n  Bayesian Optimizer (TPE): {self.n_trials} trials, "
+                  f"{n_params} params ({n_effective} effective), objective={self.objective_name}")
+            print(f"  ⚡ Parallel: {self.n_jobs} workers, batch_size={batch_size}")
+            if param_subset:
+                print(f"  Optimizing: {', '.join(param_subset)}")
+            print(f"  Conditional spaces: alpha_method → only relevant sub-params explored")
+            print(f"  {'─' * 80}")
+
+        # Configure Optuna (single-threaded study, parallel evaluation)
+        sampler = TPESampler(seed=self.seed, n_startup_trials=20)
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=sampler,
+        )
+
+        # Warm start
+        if warm_start:
+            for ws_params in warm_start[:10]:
+                study.enqueue_trial(ws_params)
+
+        # Setup shared state for workers (fork COW)
+        setup_workers(
+            strategy=strategy,
+            data=data,
+            engine_config=engine_config,
+            objective_name=self.objective_name,
+            min_trades=self.min_trades,
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+
+        interrupted = False
+        completed = 0
+        best_obj = -999.0
+
+        try:
+            with create_pool(self.n_jobs) as pool:
+                while completed < self.n_trials:
+                    # Check timeout
+                    if self.timeout and (time.time() - t0) > self.timeout:
+                        break
+
+                    # Determine batch size for this iteration
+                    remaining = self.n_trials - completed
+                    current_batch = min(batch_size, remaining)
+
+                    # ── Phase 1: Ask + suggest params (main process, fast) ──
+                    batch_items = []
+                    for _ in range(current_batch):
+                        trial = study.ask()
+                        params = self._build_search_space(trial, param_defs, param_subset)
+                        batch_items.append((trial, params))
+
+                    # ── Phase 2: Evaluate in parallel (workers, slow) ──
+                    work_items = [
+                        (completed + i, params)
+                        for i, (_, params) in enumerate(batch_items)
+                    ]
+                    results = pool.map(evaluate_trial, work_items)
+
+                    # ── Phase 3: Tell study + collect results (main process, fast) ──
+                    for (optuna_trial, optimized_params), res in zip(batch_items, results):
+                        obj_val = res['objective_value']
+
+                        # Tell Optuna the result
+                        study.tell(optuna_trial, obj_val)
+
+                        # Store in our trial list
+                        bt = BayesianTrial(
+                            trial_id=res['trial_id'],
+                            params=res['params'],
+                            sharpe_ratio=res['sharpe_ratio'],
+                            total_return=res['total_return'],
+                            max_drawdown=res['max_drawdown'],
+                            win_rate=res['win_rate'],
+                            profit_factor=res['profit_factor'],
+                            n_trades=res['n_trades'],
+                            objective_value=obj_val,
+                        )
+                        all_trials.append(bt)
+                        completed += 1
+
+                        is_best = obj_val > best_obj
+                        if is_best:
+                            best_obj = obj_val
+
+                        if self.verbose:
+                            marker = '★' if is_best else ' '
+
+                            if param_subset:
+                                p_disp = {k: (f'{v:.2f}' if isinstance(v, float) else str(v))
+                                          for k, v in optimized_params.items() if k in param_subset}
+                            else:
+                                p_disp = {k: (f'{v:.2f}' if isinstance(v, float) else str(v))
+                                          for k, v in list(optimized_params.items())[:4]}
+
+                            params_str = str(p_disp).replace("'", "")
+                            print(f"  {marker}{completed:>4}/{self.n_trials} "
+                                  f"obj={obj_val:>7.3f} "
+                                  f"SR={res['sharpe_ratio']:>5.2f} "
+                                  f"Ret={res['total_return']:>+6.1f}% "
+                                  f"WR={res['win_rate']:>4.1f}% "
+                                  f"DD={res['max_drawdown']:>5.1f}% "
+                                  f"PF={res['profit_factor']:>4.2f} "
+                                  f"T={res['n_trades']:>3} "
+                                  f"[{res['elapsed']:.0f}s] "
+                                  f"{params_str}")
+
+        except KeyboardInterrupt:
+            interrupted = True
+            if self.verbose:
+                print(f"\n  ⚠️  Interrupted after {len(all_trials)} trials — compiling partial results...")
+        finally:
+            cleanup_workers()
+
+        # Compile results (same as sequential)
+        all_trials.sort(key=lambda t: t.objective_value, reverse=True)
+
+        best = all_trials[0] if all_trials else None
+        best_params = best.params if best else {}
+
+        importances = {}
+        try:
+            imp = optuna.importance.get_param_importances(study)
+            importances = dict(imp)
+        except Exception:
+            pass
+
+        try:
+            n_complete = sum(1 for t in study.trials
+                             if t.state == optuna.trial.TrialState.COMPLETE)
+            n_pruned = sum(1 for t in study.trials
+                           if t.state == optuna.trial.TrialState.PRUNED)
+        except Exception:
+            n_complete = len(all_trials)
+            n_pruned = 0
+
+        result = BayesianResult(
+            trials=all_trials[:50],
+            best_trial=best,
+            best_params=best_params,
+            n_trials_total=n_complete + n_pruned,
+            n_trials_complete=n_complete,
+            n_trials_pruned=n_pruned,
+            elapsed_seconds=time.time() - t0,
+            objective_name=self.objective_name,
+            param_importances=importances,
+        )
+        self.last_result = result
+
+        if self.verbose and best:
+            status = "INTERRUPTED" if interrupted else "Complete"
+            speedup = (self.n_trials * (result.elapsed_seconds / max(1, completed))) / max(0.1, result.elapsed_seconds)
+            print(f"\n  {'═' * 60}")
+            print(f"  Bayesian Parallel {status} ({result.elapsed_seconds:.1f}s, ~{speedup:.1f}x vs sequential)")
+            print(f"  Trials: {n_complete} complete, {self.n_jobs} workers")
+            print(f"  Best: obj={best.objective_value:.3f} "
+                  f"SR={best.sharpe_ratio:.2f} Ret={best.total_return:+.1f}% "
+                  f"WR={best.win_rate:.1f}% DD={best.max_drawdown:.1f}%")
+            if importances:
+                top_imp = sorted(importances.items(),
+                                key=lambda x: x[1], reverse=True)[:5]
+                print(f"  Importances: {', '.join(f'{k}={v:.2f}' for k,v in top_imp)}")
+
+        return result
+
     def run_multi_objective(self,
                             strategy,
                             data: dict,
@@ -415,16 +630,19 @@ class BayesianOptimizer:
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         def _mo_objective(trial):
-            params = self._build_search_space(trial, param_defs, param_subset)
+            optimized_params = self._build_search_space(trial, param_defs, param_subset)
             strat = copy.deepcopy(strategy)
-            strat.set_params(params)
+            strat.set_params(optimized_params)
 
             engine = engine_factory()
             result = engine.run(strat, data, symbol, timeframe)
 
+            full_params = strat.default_params()
+            full_params.update(strat.params)
+
             bt = BayesianTrial(
                 trial_id=trial.number,
-                params=params,
+                params=full_params,
                 sharpe_ratio=result.sharpe_ratio,
                 total_return=result.total_return,
                 max_drawdown=result.max_drawdown,

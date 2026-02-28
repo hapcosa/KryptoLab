@@ -30,7 +30,7 @@ class CyberCycleStrategy(IStrategy):
     def parameter_defs(self) -> List[ParamDef]:
         return [
             # Alpha method
-            ParamDef('alpha_method', 'categorical', 'manual',
+            ParamDef('alpha_method', 'categorical', 'kalman',
                      options=['homodyne', 'mama', 'autocorrelation', 'kalman', 'manual']),
             ParamDef('manual_alpha', 'float', 0.35, 0.05, 0.80, 0.01),
             ParamDef('alpha_floor', 'float', 0.0, 0.0, 0.50, 0.01),
@@ -58,7 +58,7 @@ class CyberCycleStrategy(IStrategy):
             # Signal params
             ParamDef('itrend_alpha', 'float', 0.07, 0.01, 0.30, 0.01),
             ParamDef('trigger_ema', 'int', 14, 3, 30),
-            ParamDef('min_bars', 'int', 24, 5, 50),
+            ParamDef('min_bars', 'int', 24, 20, 50),
             ParamDef('confidence_min', 'float', 80.0, 30.0, 95.0, 5.0),
             ParamDef('ob_level', 'float', 1.5, 0.3, 3.0, 0.1),
             ParamDef('os_level', 'float', -1.5, -3.0, -0.3, 0.1),
@@ -102,7 +102,7 @@ class CyberCycleStrategy(IStrategy):
             # Hard cap on new signals per calendar day.
             # 0 = unlimited. 1-2 recommended for 1h timeframe.
             # Prevents overtrading in choppy conditions.
-            ParamDef('max_signals_per_day', 'int', 0, 0, 5),
+            ParamDef('max_signals_per_day', 'int',1, 1, 2, 1),
         ]
 
     def calculate_indicators(self, data: dict) -> dict:
