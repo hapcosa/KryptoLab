@@ -1,6 +1,12 @@
 """
-CryptoLab — CyberCycle v6.2 Strategy
-Faithful translation of cybercycle_v62.pine
+CryptoLab — CyberCycle v6.3 Strategy
+Based on cybercycle_v62.pine — Extended with categorized SL/TP modes.
+
+Changes from v6.2:
+- sl_tp_mode: 'atr_rr' (original) or 'fixed' (absolute USDT distances)
+- When mode='fixed': sl_fixed_pct and tp1_fixed_pct / tp2_fixed_pct
+  define distances as percentage of entry price.
+- When mode='atr_rr': behaves exactly like v6.2
 
 Ehlers Adaptive CyberCycle with:
 - 4 alpha methods (Homodyne/MAMA/Autocorrelation/Kalman) + Manual
@@ -25,11 +31,13 @@ from indicators.common import ema, sma, atr, crossover, crossunder, volume_ratio
 class CyberCycleStrategy(IStrategy):
 
     def name(self) -> str:
-        return "CyberCycle v6.2"
+        return "CyberCycle v6.3"
 
     def parameter_defs(self) -> List[ParamDef]:
         return [
-            # Alpha method
+            # ══════════════════════════════════════════════════════════
+            #  ALPHA METHOD SELECTION
+            # ══════════════════════════════════════════════════════════
             ParamDef('alpha_method', 'categorical', 'kalman',
                      options=['homodyne', 'mama', 'autocorrelation', 'kalman', 'manual']),
             ParamDef('manual_alpha', 'float', 0.35, 0.05, 0.80, 0.01),
@@ -55,7 +63,9 @@ class CyberCycleStrategy(IStrategy):
             ParamDef('kal_alpha_slow', 'float', 0.05, 0.01, 0.2, 0.01),
             ParamDef('kal_sensitivity', 'float', 2.0, 0.5, 5.0, 0.5),
 
-            # Signal params
+            # ══════════════════════════════════════════════════════════
+            #  SIGNAL PARAMS
+            # ══════════════════════════════════════════════════════════
             ParamDef('itrend_alpha', 'float', 0.07, 0.01, 0.30, 0.01),
             ParamDef('trigger_ema', 'int', 14, 3, 30),
             ParamDef('min_bars', 'int', 24, 20, 50),
@@ -69,40 +79,47 @@ class CyberCycleStrategy(IStrategy):
             ParamDef('volume_mult', 'float', 2.0, 0.5, 5.0, 0.1),
             ParamDef('use_htf', 'bool', False),
 
-            # ── Risk params ──────────────────────────────────────────
+            # ══════════════════════════════════════════════════════════
+            #  SL/TP MODE — CATEGORIZED
+            # ══════════════════════════════════════════════════════════
+            #
+            #  'atr_rr' (default, original v6.2 behavior):
+            #      SL = entry ∓ ATR × sl_atr_mult
+            #      TP = entry ± risk × tp_rr
+            #
+            #  'fixed' (new):
+            #      SL = entry ∓ entry × sl_fixed_pct / 100
+            #      TP1 = entry ± entry × tp1_fixed_pct / 100
+            #      TP2 = entry ± entry × tp2_fixed_pct / 100
+            #
+            ParamDef('sl_tp_mode', 'categorical', 'atr_rr',
+                     options=['atr_rr', 'fixed']),
+
+            # ── ATR-RR mode params (original) ─────────────────────────
             ParamDef('leverage',    'float', 15.0, 1.0, 25.0, 5.0),
             ParamDef('sl_atr_mult', 'float', 1.5, 0.5,  4.0, 0.1),
-
-            # TP1 / TP2 — R:R multipliers sobre la distancia al SL
-            # Ej: tp1_rr=1.5 → TP1 en entry ± risk*1.5
             ParamDef('tp1_rr',   'float', 2.0, 0.5,  5.0, 0.25),
-            ParamDef('tp1_size', 'float', 0.6, 0.1,  0.9, 0.05),   # fraccion cerrada en TP1
+            ParamDef('tp1_size', 'float', 0.6, 0.1,  0.9, 0.05),
             ParamDef('tp2_rr',   'float', 3.0, 1.0, 10.0, 0.25),
-            # TP2 cierra el resto (1 - tp1_size)
+
+            # ── Fixed mode params (new) ───────────────────────────────
+            # Distances as percentage of entry price
+            # E.g. sl_fixed_pct=2.0 → SL at 2% from entry
+            ParamDef('sl_fixed_pct',  'float', 2.0, 0.5, 10.0, 0.25),
+            ParamDef('tp1_fixed_pct', 'float', 3.0, 0.5, 15.0, 0.25),
+            ParamDef('tp2_fixed_pct', 'float', 6.0, 1.0, 25.0, 0.5),
 
             # ── Break-even ────────────────────────────────────────────
-            # BE se activa cuando el precio mueve be_pct% a nuestro favor desde entrada
-            # be_pct=0 → desactivado
             ParamDef('be_pct', 'float', 1.5, 0.0, 2.5, 0.1),
 
             # ── Trailing stop ─────────────────────────────────────────
             ParamDef('use_trailing', 'bool', True),
-            # Trailing se activa al mover trail_activate_pct% a favor
             ParamDef('trail_activate_pct', 'float', 2.5, 0.0, 5.0, 0.25),
-            # Una vez activo: SL sigue al mejor precio con retroceso de trail_pullback_pct%
             ParamDef('trail_pullback_pct', 'float', 1.0, 0.1,  2.0, 0.10),
 
             # ── Close on opposite signal ──────────────────────────────
-            # Si llega señal contraria mientras hay posición abierta:
-            #   True  → cierra posición actual y abre la nueva (reversal)
-            #   False → ignora la señal nueva, deja correr la posición
             ParamDef('close_on_signal', 'bool', True),
-
-            # ── Max signals per day ──────────────────────────────────
-            # Hard cap on new signals per calendar day.
-            # 0 = unlimited. 1-2 recommended for 1h timeframe.
-            # Prevents overtrading in choppy conditions.
-            ParamDef('max_signals_per_day', 'int',1, 1, 2, 1),
+            ParamDef('max_signals_per_day', 'int', 1, 1, 2, 1),
         ]
 
     def calculate_indicators(self, data: dict) -> dict:
@@ -205,8 +222,8 @@ class CyberCycleStrategy(IStrategy):
         # ATR for SL/TP
         atr_vals = atr(data['high'], data['low'], close, 14)
 
-        # HTF filter (simplified: use higher-period EMA as proxy)
-        htf_src = ema(src, 40)  # Proxy for 4H hl2 when backtesting on lower TF
+        # HTF filter
+        htf_src = ema(src, 40)
         htf_cc = ema(close, 40)
         use_htf = self.get_param('use_htf', True)
         htf_bull = ~use_htf | (htf_src > htf_cc)
@@ -233,7 +250,6 @@ class CyberCycleStrategy(IStrategy):
             'atr': atr_vals,
             'htf_align_buy': htf_bull,
             'htf_align_sell': htf_bear,
-            # All alphas for diagnostics
             'alpha_hd': a_hd, 'alpha_ma': a_ma,
             'alpha_ac': a_ac, 'alpha_kl': a_kl,
         }
@@ -260,14 +276,7 @@ class CyberCycleStrategy(IStrategy):
 
         is_buy = bull_cross
 
-        # Compute confidence — ALL filtering happens through scoring.
-        # iTrend, HTF, volume, fisher, momentum each contribute points.
-        # confidence_min controls the minimum required confluence.
-        #
-        # This replaces the old system where iTrend and HTF were BOTH
-        # in confidence (+15 pts) AND used as hard filters (return None).
-        # That was redundant: the hard filter killed the signal before
-        # the confidence points could ever differentiate anything.
+        # Compute confidence
         conf = compute_confidence(
             is_buy=is_buy,
             bull_cross=bull_cross,
@@ -293,31 +302,53 @@ class CyberCycleStrategy(IStrategy):
 
         self._last_signal_bar = idx
 
-        # ── Entry & Fixed SL ─────────────────────────────────────────
+        # ══════════════════════════════════════════════════════════════
+        #  ENTRY & SL/TP — CATEGORIZED BY sl_tp_mode
+        # ══════════════════════════════════════════════════════════════
         direction = 1 if is_buy else -1
-        entry    = data['close'][idx]
-        atr_val  = ind['atr'][idx]
+        entry     = data['close'][idx]
+        atr_val   = ind['atr'][idx]
+        mode      = self.get_param('sl_tp_mode', 'atr_rr')
 
-        # SL fijo: distancia en ATR desde la entrada
-        sl_dist = atr_val * self.get_param('sl_atr_mult', 2.0)
-        sl      = entry - direction * sl_dist          # SL no se mueve hasta BE / trailing
-        risk    = sl_dist                               # = abs(entry - sl)
+        if mode == 'fixed':
+            # ── FIXED MODE ───────────────────────────────────────────
+            # SL/TP are fixed percentages of entry price.
+            # Independent of ATR — behaves identically regardless of
+            # volatility regime. Useful for stable pairs or when
+            # optimization finds ATR-based exits suboptimal.
+            sl_pct  = self.get_param('sl_fixed_pct',  2.0)
+            tp1_pct = self.get_param('tp1_fixed_pct', 3.0)
+            tp2_pct = self.get_param('tp2_fixed_pct', 6.0)
 
-        # ── Dos niveles de TP (R:R sobre el riesgo) ──────────────────
-        tp1_rr   = self.get_param('tp1_rr',   1.5)
-        tp2_rr   = self.get_param('tp2_rr',   3.0)
-        tp1_size = self.get_param('tp1_size',  0.5)    # fraccion cerrada en TP1
-        tp2_size = round(1.0 - tp1_size, 8)            # resto se cierra en TP2
+            sl_dist = entry * (sl_pct / 100.0)
+            sl      = entry - direction * sl_dist
 
-        tp1 = entry + direction * risk * tp1_rr
-        tp2 = entry + direction * risk * tp2_rr
+            tp1 = entry + direction * entry * (tp1_pct / 100.0)
+            tp2 = entry + direction * entry * (tp2_pct / 100.0)
+
+            risk = sl_dist  # for BE/trailing calculations
+
+        else:
+            # ── ATR_RR MODE (original v6.2) ──────────────────────────
+            # SL = ATR × multiplier; TP = risk × R:R ratio
+            sl_dist = atr_val * self.get_param('sl_atr_mult', 2.0)
+            sl      = entry - direction * sl_dist
+            risk    = sl_dist
+
+            tp1_rr = self.get_param('tp1_rr', 1.5)
+            tp2_rr = self.get_param('tp2_rr', 3.0)
+
+            tp1 = entry + direction * risk * tp1_rr
+            tp2 = entry + direction * risk * tp2_rr
+
+        # ── TP sizes (shared) ────────────────────────────────────────
+        tp1_size = self.get_param('tp1_size', 0.6)
+        tp2_size = round(1.0 - tp1_size, 8)
 
         tp_levels = [tp1, tp2]
         tp_sizes  = [tp1_size, tp2_size]
 
         # ── Break-even ───────────────────────────────────────────────
-        # El motor mueve el SL a entry cuando el precio alcanza be_trigger.
-        # be_pct=0 → desactivado (be_trigger=0 en el engine = sin BE)
         be_pct = self.get_param('be_pct', 0.5)
         if be_pct > 0.0:
             be_trigger = entry + direction * entry * (be_pct / 100.0)
@@ -325,30 +356,18 @@ class CyberCycleStrategy(IStrategy):
             be_trigger = 0.0
 
         # ── Trailing stop ────────────────────────────────────────────
-        # trail_activate_pct: precio debe moverse X% para activar trailing
-        # trail_pullback_pct: una vez activo, el SL queda X% por debajo del mejor precio
         use_trailing = self.get_param('use_trailing', True)
         if use_trailing:
-            trail_activate_pct  = self.get_param('trail_activate_pct', 1.0)
-            trail_pullback_pct  = self.get_param('trail_pullback_pct', 0.5)
+            trail_activate_pct = self.get_param('trail_activate_pct', 1.0)
+            trail_pullback_pct = self.get_param('trail_pullback_pct', 0.5)
+            trailing_distance  = entry * (trail_pullback_pct / 100.0)
 
-            # trailing_distance se expresa en puntos de precio (absoluto)
-            # El engine usa: new_sl = trailing_high - trailing_distance (longs)
-            #                          trailing_high + trailing_distance (shorts)
-            # Aquí lo calculamos como % del precio de entrada
-            trailing_distance = entry * (trail_pullback_pct / 100.0)
-
-            # Sobreescribir be_trigger con el nivel de activacion del trailing
-            # si trail_activate_pct genera un nivel más cercano que be_pct
             trail_activation_price = entry + direction * entry * (trail_activate_pct / 100.0)
-            # Usamos el más conservador como be_trigger (el que está más cerca de entry)
             if be_pct > 0.0:
-                # Ambos activos: usar el que esté más cerca de la entrada
                 dist_be    = abs(be_trigger - entry)
                 dist_trail = abs(trail_activation_price - entry)
                 be_trigger = be_trigger if dist_be <= dist_trail else trail_activation_price
             else:
-                # Solo trailing: usar trail_activation como trigger de BE tambien
                 be_trigger = trail_activation_price
         else:
             trailing_distance = 0.0
@@ -367,6 +386,7 @@ class CyberCycleStrategy(IStrategy):
             metadata={
                 'close_on_signal': self.get_param('close_on_signal', True),
                 'max_signals_per_day': self.get_param('max_signals_per_day', 0),
+                'sl_tp_mode':    mode,
                 'alpha_method':  self.get_param('alpha_method'),
                 'alpha':         ind['alpha'][idx],
                 'period':        ind['period'][idx],
