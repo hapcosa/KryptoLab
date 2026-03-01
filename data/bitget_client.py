@@ -351,16 +351,22 @@ class BitgetClient:
 
         all_candles      = []
         current_end      = end_ms
-        max_pages        = 2000
         consecutive_empty = 0
         t0               = time.time()
         used_recent_first = False  # Track if we already fetched the latest via candles
+
+        # Dynamic max_pages: estimate needed pages + 20% safety margin
+        # history-candles=200/page, recent candles=1000/page
+        # Use conservative 200/page for estimation
+        total_bars_est = max(1, (end_ms - start_ms) // tf_ms)
+        max_pages = max(2000, int(total_bars_est / HISTORY_LIMIT * 1.3))
 
         if self.verbose:
             total_est = max(1, (end_ms - start_ms) // tf_ms)
             print(f"      productType={product_type}, "
                   f"granularity={TIMEFRAME_MAP.get(timeframe, timeframe)}, "
-                  f"ssl={_SSL_MODE}, ~{total_est:,} bars expected")
+                  f"ssl={_SSL_MODE}, ~{total_est:,} bars expected, "
+                  f"max_pages={max_pages:,}")
 
         for page in range(1, max_pages + 1):
             if current_end <= start_ms:

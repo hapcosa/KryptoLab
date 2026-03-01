@@ -420,18 +420,20 @@ class GridSearchOptimizer:
             param_grid: Dict[str, List[Any]],
             symbol: str = "",
             timeframe: str = "",
-            top_n: int = 10) -> GridSearchResult:
+            top_n: int = 10,
+            engine_config: dict = None) -> GridSearchResult:
         """
         Execute grid search.
 
         Args:
             strategy: IStrategy instance (will be deep-copied per trial)
             data: Full OHLCV data dict
-            engine_factory: Callable returning BacktestEngine
+            engine_factory: Callable returning BacktestEngine (used if n_jobs=1)
             param_grid: Dict[param_name → list_of_values]
             symbol: For reporting
             timeframe: For reporting
             top_n: Return top N trials sorted by objective
+            engine_config: For parallel execution (n_jobs > 1)
 
         Returns:
             GridSearchResult with ranked trials
@@ -444,63 +446,71 @@ class GridSearchOptimizer:
         total = len(all_combos)
 
         if self.verbose:
+            jobs_str = f", {self.n_jobs} workers" if self.n_jobs > 1 else ""
             print(f"\n  Grid Search: {total} combinations, "
-                  f"objective={self.objective_name}")
+                  f"objective={self.objective_name}{jobs_str}")
             print(f"  Parameters: {', '.join(keys)}")
-            print(f"  {'─' * 72}")
-            print(f"  {'#':>4} {'Obj':>7} {'SR':>6} {'Ret%':>7} {'WR%':>5} "
-                  f"{'DD%':>6} {'PF':>5} {'Trd':>4}  Params")
             print(f"  {'─' * 72}")
 
         trials = []
         interrupted = False
 
-        try:
-            for trial_id, combo in enumerate(all_combos):
-                optimized_params = dict(zip(keys, combo))
+        if self.n_jobs > 1 and engine_config is not None and total > 1:
+            # ── PARALLEL EXECUTION ──
+            trials, interrupted = self._run_parallel(
+                strategy, data, keys, all_combos, total,
+                engine_config, symbol, timeframe)
+        else:
+            # ── SEQUENTIAL EXECUTION ──
+            if self.verbose and self.n_jobs <= 1:
+                print(f"  {'#':>4} {'Obj':>7} {'SR':>6} {'Ret%':>7} {'WR%':>5} "
+                      f"{'DD%':>6} {'PF':>5} {'Trd':>4}  Params")
+                print(f"  {'─' * 72}")
 
-                t1 = time.time()
-                strat = copy.deepcopy(strategy)
-                strat.set_params(optimized_params)
+            try:
+                for trial_id, combo in enumerate(all_combos):
+                    optimized_params = dict(zip(keys, combo))
 
-                engine = engine_factory()
-                result = engine.run(strat, data, symbol, timeframe)
+                    t1 = time.time()
+                    strat = copy.deepcopy(strategy)
+                    strat.set_params(optimized_params)
 
-                obj_val = self.objective_fn(result) if result.n_trades >= self.min_trades else -999.0
+                    engine = engine_factory()
+                    result = engine.run(strat, data, symbol, timeframe)
 
-                # Full snapshot: defaults + loaded phase1 + optimized
-                full_params = strat.default_params()
-                full_params.update(strat.params)
+                    obj_val = self.objective_fn(result) if result.n_trades >= self.min_trades else -999.0
 
-                trial = GridSearchTrial(
-                    trial_id=trial_id,
-                    params=full_params,
-                    sharpe_ratio=result.sharpe_ratio,
-                    total_return=result.total_return,
-                    sortino_ratio=result.sortino_ratio,
-                    max_drawdown=result.max_drawdown,
-                    win_rate=result.win_rate,
-                    profit_factor=result.profit_factor,
-                    calmar_ratio=result.calmar_ratio,
-                    n_trades=result.n_trades,
-                    objective_value=obj_val,
-                    elapsed=time.time() - t1,
-                )
-                trials.append(trial)
+                    full_params = strat.default_params()
+                    full_params.update(strat.params)
 
+                    trial = GridSearchTrial(
+                        trial_id=trial_id,
+                        params=full_params,
+                        sharpe_ratio=result.sharpe_ratio,
+                        total_return=result.total_return,
+                        sortino_ratio=result.sortino_ratio,
+                        max_drawdown=result.max_drawdown,
+                        win_rate=result.win_rate,
+                        profit_factor=result.profit_factor,
+                        calmar_ratio=result.calmar_ratio,
+                        n_trades=result.n_trades,
+                        objective_value=obj_val,
+                        elapsed=time.time() - t1,
+                    )
+                    trials.append(trial)
+
+                    if self.verbose:
+                        marker = '★' if not trials or obj_val >= max(t.objective_value for t in trials) else ' '
+                        short_params = {k: (f'{v:.1f}' if isinstance(v, float) else str(v)) for k, v in optimized_params.items()}
+                        params_str = str(short_params).replace("'", "")
+                        print(f"  {marker}{trial_id+1:>3} {obj_val:>7.3f} "
+                              f"{result.sharpe_ratio:>6.2f} {result.total_return:>+6.1f}% "
+                              f"{result.win_rate:>5.1f} {result.max_drawdown:>5.1f}% "
+                              f"{result.profit_factor:>5.2f} {result.n_trades:>4}  {params_str}")
+            except KeyboardInterrupt:
+                interrupted = True
                 if self.verbose:
-                    # Show every trial with full metrics
-                    marker = '★' if not trials or obj_val >= max(t.objective_value for t in trials) else ' '
-                    short_params = {k: (f'{v:.1f}' if isinstance(v, float) else str(v)) for k, v in optimized_params.items()}
-                    params_str = str(short_params).replace("'", "")
-                    print(f"  {marker}{trial_id+1:>3} {obj_val:>7.3f} "
-                          f"{result.sharpe_ratio:>6.2f} {result.total_return:>+6.1f}% "
-                          f"{result.win_rate:>5.1f} {result.max_drawdown:>5.1f}% "
-                          f"{result.profit_factor:>5.2f} {result.n_trades:>4}  {params_str}")
-        except KeyboardInterrupt:
-            interrupted = True
-            if self.verbose:
-                print(f"\n  ⚠️  Interrupted after {len(trials)}/{total} — compiling partial results...")
+                    print(f"\n  ⚠️  Interrupted after {len(trials)}/{total} — compiling partial results...")
 
         # Sort by objective (works with partial results)
         trials.sort(key=lambda t: t.objective_value, reverse=True)
@@ -531,6 +541,82 @@ class GridSearchOptimizer:
 
         return result
 
+    def _run_parallel(self, strategy, data, keys, all_combos, total,
+                      engine_config, symbol, timeframe):
+        """Run grid search trials in parallel using multiprocessing."""
+        from optimize.parallel import setup_workers, evaluate_trial, cleanup_workers, create_pool
+
+        setup_workers(
+            strategy=strategy,
+            data=data,
+            engine_config=engine_config,
+            objective_name=self.objective_name,
+            min_trades=self.min_trades,
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+
+        # Build work items: (trial_id, params_dict)
+        work_items = [
+            (tid, dict(zip(keys, combo)))
+            for tid, combo in enumerate(all_combos)
+        ]
+
+        trials = []
+        interrupted = False
+
+        try:
+            with create_pool(self.n_jobs) as pool:
+                # Use imap_unordered for progress reporting
+                completed = 0
+                best_obj = -999.0
+
+                for res in pool.imap_unordered(evaluate_trial, work_items,
+                                                chunksize=max(1, total // (self.n_jobs * 4))):
+                    trial = GridSearchTrial(
+                        trial_id=res['trial_id'],
+                        params=res['params'],
+                        sharpe_ratio=res['sharpe_ratio'],
+                        total_return=res['total_return'],
+                        sortino_ratio=res['sortino_ratio'],
+                        max_drawdown=res['max_drawdown'],
+                        win_rate=res['win_rate'],
+                        profit_factor=res['profit_factor'],
+                        calmar_ratio=res['calmar_ratio'],
+                        n_trades=res['n_trades'],
+                        objective_value=res['objective_value'],
+                        elapsed=res['elapsed'],
+                    )
+                    trials.append(trial)
+                    completed += 1
+
+                    is_best = trial.objective_value > best_obj
+                    if is_best:
+                        best_obj = trial.objective_value
+
+                    if self.verbose:
+                        marker = '★' if is_best else ' '
+                        pct = completed / total * 100
+                        p = res.get('optimized_params', {})
+                        p_str = str({k: (f'{v:.1f}' if isinstance(v, float) else str(v))
+                                     for k, v in p.items()}).replace("'", "")
+                        print(f"  {marker}{completed:>4}/{total} ({pct:4.0f}%) "
+                              f"obj={trial.objective_value:>7.3f} "
+                              f"SR={trial.sharpe_ratio:>5.2f} "
+                              f"Ret={trial.total_return:>+6.1f}% "
+                              f"WR={trial.win_rate:>4.1f}% "
+                              f"T={trial.n_trades:>4} "
+                              f"[{res['elapsed']:.1f}s] {p_str}")
+
+        except KeyboardInterrupt:
+            interrupted = True
+            if self.verbose:
+                print(f"\n  ⚠️  Interrupted after {len(trials)}/{total} — compiling partial results...")
+        finally:
+            cleanup_workers()
+
+        return trials, interrupted
+
     def run_with_validation(self,
                             strategy,
                             data: dict,
@@ -538,7 +624,8 @@ class GridSearchOptimizer:
                             param_grid: Dict[str, List[Any]],
                             val_ratio: float = 0.3,
                             symbol: str = "",
-                            timeframe: str = "") -> GridSearchResult:
+                            timeframe: str = "",
+                            engine_config: dict = None) -> GridSearchResult:
         """
         Grid search with train/validation split.
         Optimizes on training data, reports validation performance.
@@ -556,7 +643,8 @@ class GridSearchOptimizer:
 
         # Optimize on training
         result = self.run(strategy, train_data, engine_factory,
-                         param_grid, symbol, timeframe)
+                         param_grid, symbol, timeframe,
+                         engine_config=engine_config)
 
         # Validate top 5
         if self.verbose and result.trials:
