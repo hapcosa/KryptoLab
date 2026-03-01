@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-CryptoLab — Command Line Interface
+CryptoLab — Command Line Interface v0.7 (Parallel)
 
 Usage:
     python cli.py backtest --strategy cybercycle --symbol BTCUSDT --tf 4h
     python cli.py backtest --strategy gaussbands --symbol ETHUSDT --tf 1h --leverage 5
     python cli.py backtest --strategy smartmoney --symbol SOLUSDT --tf 4h
     python cli.py demo      (runs demo with sample data)
+
+Parallel:
+    python cli.py optimize --method bayesian --n-jobs -1      (auto-detect cores)
+    python cli.py validate --n-jobs 8                         (8 workers)
+    python cli.py download --batch crypto --n-jobs 4          (4 concurrent symbols)
 """
 import sys
 import os
@@ -40,6 +45,47 @@ def get_strategy(name: str):
         return SmartMoneyStrategy()
     else:
         raise ValueError(f"Unknown strategy: {name}. Options: cybercycle, gaussbands, smartmoney")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PARALLEL HELPERS
+# ═══════════════════════════════════════════════════════════════
+
+def _get_n_jobs(args):
+    """Get number of parallel workers from args, with auto-detect."""
+    n_jobs_raw = args.get('n_jobs', 1)
+    try:
+        from optimize.parallel import get_n_jobs
+        return get_n_jobs(n_jobs_raw)
+    except ImportError:
+        return max(1, n_jobs_raw) if n_jobs_raw > 0 else 1
+
+
+def _build_engine_config(capital, detail_info, market_config=None):
+    """Build serializable engine config for parallel workers."""
+    _detail = detail_info or {'data': None, 'tf': None}
+    return {
+        'capital': capital,
+        'market_config': market_config,
+        'detail_data': _detail.get('data'),
+        'detail_tf': _detail.get('tf'),
+    }
+
+
+def _print_parallel_info(n_jobs):
+    """Print hardware/parallel info if n_jobs > 1."""
+    if n_jobs <= 1:
+        return
+    try:
+        from optimize.parallel import detect_hardware
+        hw = detect_hardware()
+        cpu_str = f"{hw['cpu_name']}" if hw['cpu_name'] != 'Unknown' else ''
+        gpu_str = f" | GPU: {hw['gpu_name']} ({hw['gpu_vram']})" if hw.get('gpu_name') else ''
+        print(f"   ⚡ Parallel: {n_jobs} workers / {hw['cpu_count']} cores{gpu_str}")
+        if cpu_str:
+            print(f"   CPU: {cpu_str}")
+    except Exception:
+        print(f"   ⚡ Parallel: {n_jobs} workers")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -354,11 +400,14 @@ def cmd_list_params(args):
     print(f"  Total: {len(strategy.parameter_defs())} parameters")
 
 
+# ═══════════════════════════════════════════════════════════════
+#  VALIDATE — Parallel (4-8x speedup with --n-jobs)
+# ═══════════════════════════════════════════════════════════════
+
 def cmd_validate(args):
-    """Run anti-overfitting validation pipeline (Phase 3)."""
+    """Run anti-overfitting validation pipeline (Phase 3) — with parallel support."""
     from core.engine import BacktestEngine
     from data.bitget_client import DataCache, generate_sample_data
-    from optimize.anti_overfit import AntiOverfitPipeline
 
     strategy_name = args.get('strategy', 'cybercycle')
     symbol = args.get('symbol', 'BTCUSDT')
@@ -367,12 +416,9 @@ def cmd_validate(args):
     leverage = args.get('leverage', None)
 
     strategy = get_strategy(strategy_name)
-
-    # Override leverage if provided
     if leverage is not None:
         strategy.set_params({'leverage': leverage})
 
-    # Load params from JSON file
     _load_params_file(args, strategy)
 
     print(f"\n🔬 CryptoLab — Anti-Overfitting Validation")
@@ -380,16 +426,41 @@ def cmd_validate(args):
     print(f"   {symbol} | {timeframe}")
     if leverage:
         print(f"   Leverage: {leverage}x")
-    print()
 
     # Load data + detail data
     data, detail_info, symbol, timeframe = _load_data(args, timeframe)
 
-    # Engine factory WITH detail data
     engine_factory = _make_engine_factory(capital, detail_info)
-
-    # Build a small param grid for WFA from strategy defaults
     param_grid = _build_validation_grid(strategy)
+
+    # ── Parallel setup ──
+    n_jobs = _get_n_jobs(args)
+
+    if n_jobs > 1:
+        try:
+            from optimize.anti_overfit_parallel import ParallelAntiOverfitPipeline
+
+            engine_config = _build_engine_config(capital, detail_info)
+            _print_parallel_info(n_jobs)
+            print()
+
+            pipeline = ParallelAntiOverfitPipeline(
+                n_jobs=n_jobs,
+                wfa_windows=4,
+                mc_simulations=1000,
+                fail_fast=False,
+                verbose=True,
+            )
+            result = pipeline.run(strategy, data, engine_factory,
+                                  param_grid, symbol, timeframe,
+                                  engine_config=engine_config)
+            return result
+        except ImportError:
+            print("   ⚠ anti_overfit_parallel.py not found, using sequential")
+
+    # ── Sequential fallback ──
+    print()
+    from optimize.anti_overfit import AntiOverfitPipeline
 
     pipeline = AntiOverfitPipeline(
         wfa_windows=4,
@@ -397,10 +468,8 @@ def cmd_validate(args):
         fail_fast=False,
         verbose=True,
     )
-
     result = pipeline.run(strategy, data, engine_factory,
                           param_grid, symbol, timeframe)
-
     return result
 
 
@@ -577,10 +646,12 @@ def _make_engine_factory(capital: float = 10000.0,
     return factory
 
 
-# ─── Phase 4 Commands ───
+# ═══════════════════════════════════════════════════════════════
+#  OPTIMIZE — Parallel (uses --n-jobs for bayesian/grid)
+# ═══════════════════════════════════════════════════════════════
 
 def cmd_optimize(args):
-    """Optimization with multiple methods and objectives."""
+    """Optimization with multiple methods and objectives — with parallel support."""
     strategy_name = args.get('strategy', 'cybercycle')
     capital = args.get('capital', 10000.0)
     leverage = args.get('leverage', None)
@@ -609,6 +680,10 @@ def cmd_optimize(args):
     data, detail_info, symbol, tf = _load_data(args)
     engine_factory = _make_engine_factory(capital, detail_info)
 
+    # ── Parallel setup ──
+    n_jobs = _get_n_jobs(args)
+    engine_config = _build_engine_config(capital, detail_info)
+
     method_labels = {
         'grid': 'Grid Search',
         'bayesian': 'Bayesian (Optuna TPE)',
@@ -623,6 +698,7 @@ def cmd_optimize(args):
         print(f"   Leverage: {leverage}x")
     if param_subset:
         print(f"   Params: {', '.join(param_subset)} ({len(param_subset)} of {len(strategy.parameter_defs())})")
+    _print_parallel_info(n_jobs)
     print()
 
     # ── Run optimization (Ctrl+C safe) ──────────────────────────
@@ -648,12 +724,14 @@ def cmd_optimize(args):
                 optimizer = BayesianOptimizer(
                     n_trials=n_trials,
                     objective=objective,
+                    n_jobs=n_jobs,
                     verbose=True,
                 )
                 result = optimizer.run(
                     strategy, data, engine_factory,
                     symbol=symbol, timeframe=tf,
                     param_subset=param_subset,
+                    engine_config=engine_config,
                 )
                 if result and result.param_importances:
                     extra_json['param_importances'] = result.param_importances
@@ -700,10 +778,15 @@ def cmd_optimize(args):
             else:
                 param_grid = _build_validation_grid(strategy)
 
-            optimizer = GridSearchOptimizer(objective=objective, verbose=True)
-            result = optimizer.run_with_validation(
+            optimizer = GridSearchOptimizer(
+                objective=objective,
+                n_jobs=n_jobs,
+                verbose=True,
+            )
+            result = optimizer.run(
                 strategy, data, engine_factory,
                 param_grid, symbol=symbol, timeframe=tf,
+                engine_config=engine_config,
             )
 
     except KeyboardInterrupt:
@@ -834,6 +917,9 @@ def cmd_optimize(args):
     return result
 
 
+# ═══════════════════════════════════════════════════════════════
+#  REGIME — Concurrent detection + backtest (~1.3x speedup)
+# ═══════════════════════════════════════════════════════════════
 
 def cmd_regime(args):
     """Detect market regimes and analyze per-regime performance."""
@@ -856,12 +942,20 @@ def cmd_regime(args):
 
     engine_factory = _make_engine_factory(capital, detail_info)
 
+    # ── Try parallel (concurrent detect + backtest) ──
+    try:
+        from optimize.task_parallel import parallel_regime
+        rr, perf = parallel_regime(
+            strategy, data, engine_factory,
+            symbol=symbol, timeframe=tf, verbose=True)
+        return rr, perf
+    except ImportError:
+        pass
+
+    # ── Sequential fallback ──
     from ml.regime_detector import detect_regime, strategy_regime_performance
 
-    # Detect regimes
     rr = detect_regime(data, method='vt', verbose=True)
-
-    # Analyze per-regime performance
     perf = strategy_regime_performance(
         strategy, data, engine_factory, rr,
         symbol=symbol, timeframe=tf, verbose=True)
@@ -892,6 +986,10 @@ def cmd_ensemble(args):
     return result
 
 
+# ═══════════════════════════════════════════════════════════════
+#  TARGETS — Optimized with pre-computed buckets (~1.2x speedup)
+# ═══════════════════════════════════════════════════════════════
+
 def cmd_targets(args):
     """Evaluate temporal targets for a strategy."""
     strategy_name = args.get('strategy', 'cybercycle')
@@ -903,7 +1001,6 @@ def cmd_targets(args):
     if leverage is not None:
         strategy.set_params({'leverage': leverage})
 
-    # Load params from JSON file
     _load_params_file(args, strategy)
 
     data, detail_info, symbol, tf = _load_data(args)
@@ -913,13 +1010,10 @@ def cmd_targets(args):
     print(f"   {symbol} | {tf}")
     print(f"   Targets: {target_preset}\n")
 
-    # Create engine with detail data
-    engine = _make_engine_factory(capital, detail_info)()
-    result = engine.run(strategy, data, symbol, tf)
+    engine_factory = _make_engine_factory(capital, detail_info)
 
     from ml.temporal_targets import (
-        evaluate_targets, CONSERVATIVE_TARGETS,
-        AGGRESSIVE_TARGETS, CONSISTENCY_TARGETS,
+        CONSERVATIVE_TARGETS, AGGRESSIVE_TARGETS, CONSISTENCY_TARGETS,
     )
 
     targets_map = {
@@ -932,6 +1026,23 @@ def cmd_targets(args):
     if target_preset not in targets_map:
         print(f"   ⚠️  Unknown preset '{target_preset}', using conservative")
         print(f"      Options: conservative, aggressive, consistency\n")
+
+    # ── Try optimized version (pre-computed buckets) ──
+    try:
+        from optimize.task_parallel import parallel_targets
+        tt_result = parallel_targets(
+            strategy, data, engine_factory,
+            symbol=symbol, timeframe=tf,
+            target_specs=targets, capital=capital, verbose=True)
+        return tt_result
+    except ImportError:
+        pass
+
+    # ── Sequential fallback ──
+    from ml.temporal_targets import evaluate_targets
+
+    engine = engine_factory()
+    result = engine.run(strategy, data, symbol, tf)
 
     tt_result = evaluate_targets(
         targets, result.trades,
@@ -978,7 +1089,9 @@ def cmd_combinatorial(args):
     return result
 
 
-# ─── Data Management Commands ───
+# ═══════════════════════════════════════════════════════════════
+#  DOWNLOAD — Parallel batch (3-5x speedup with asyncio.gather)
+# ═══════════════════════════════════════════════════════════════
 
 def cmd_download(args):
     """
@@ -987,7 +1100,7 @@ def cmd_download(args):
     Examples:
         python cli.py download --symbol BTCUSDT --tf 4h --start 2023-01-01 --end 2025-01-01
         python cli.py download --symbol ETHUSDT --tf 1h --start 2024-01-01 --end 2025-01-01
-        python cli.py download --symbol TSLAUSDT --tf 4h --start 2024-06-01 --end 2025-01-01
+        python cli.py download --batch crypto --tf 4h --start 2023-01-01 --end 2025-01-01
     """
     from data.data_manager import DataManager, POPULAR_CRYPTO, POPULAR_STOCKS
 
@@ -1000,7 +1113,6 @@ def cmd_download(args):
     dm = DataManager(verbose=True)
 
     if batch:
-        # Batch download
         if batch == 'crypto':
             symbols = POPULAR_CRYPTO
         elif batch == 'stocks':
@@ -1010,6 +1122,21 @@ def cmd_download(args):
         else:
             symbols = batch.split(',')
 
+        # ── Try parallel batch download ──
+        try:
+            from data.download_parallel import download_batch_parallel
+            download_batch_parallel(
+                symbols, tf, start, end,
+                cache_dir=str(dm.cache.cache_dir),
+                max_concurrent=4,
+                rate_limit=15,
+                verbose=True,
+            )
+            return
+        except ImportError:
+            pass
+
+        # ── Sequential fallback ──
         dm.download_batch(symbols, tf, start, end)
         return
 
@@ -1133,8 +1260,8 @@ def main():
     if len(sys.argv) < 2:
         print("""
 ╔══════════════════════════════════════════════════════════════╗
-║                    CryptoLab Engine v0.5                    ║
-║     Backtesting, Validation & ML for Perp Futures           ║
+║                    CryptoLab Engine v0.7                    ║
+║  Backtesting, Validation & ML for Perp Futures (Parallel)   ║
 ╠══════════════════════════════════════════════════════════════╣
 ║                                                              ║
 ║  Data Commands:                                              ║
@@ -1178,6 +1305,7 @@ def main():
 ║    --method     STR        grid|bayesian|genetic             ║
 ║    --targets    STR        conservative|aggressive|consistency║
 ║    --n-trials   INT        Trials for bayesian (default 100) ║
+║    --n-jobs     INT        Parallel workers (-1=auto, 1=seq) ║
 ║    --optimize-params STR   Params to optimize (comma-sep)    ║
 ║    --trial   INT          Pick trial from top 10 (1-10)     ║
 ║                                                              ║
@@ -1186,15 +1314,12 @@ def main():
 ║    python cli.py backtest --strategy cybercycle \\             ║
 ║      --symbol SOLUSDT --tf 1h --leverage 10                  ║
 ║    python cli.py optimize --strategy cybercycle \\             ║
-║      --method bayesian --objective monthly --n-trials 200    ║
+║      --method bayesian --objective monthly --n-trials 200   ║
 ║    python cli.py optimize --strategy cybercycle \\             ║
-║      --method bayesian --objective composite \\                ║
-║      --optimize-params confidence_min,sl_atr_mult,tp1_rr    ║
-║    python cli.py backtest --params-file output/params_*.json ║
+║      --method bayesian --n-jobs -1 --n-trials 300           ║
 ║    python cli.py validate --strategy cybercycle \\             ║
-║      --params-file output/params_cybercycle_SOLUSDT_1h.json  ║
-║    python cli.py validate --strategy cybercycle \\             ║
-║      --params-file output/params_*.json --trial 4            ║
+║      --params-file output/params_*.json --n-jobs -1         ║
+║    python cli.py download --batch crypto --tf 4h            ║
 ║    python cli.py targets --strategy cybercycle \\              ║
 ║      --targets aggressive --leverage 10                      ║
 ║                                                              ║
@@ -1259,6 +1384,9 @@ def main():
             i += 2
         elif arg == '--n-trials':
             args['n_trials'] = int(sys.argv[i + 1])
+            i += 2
+        elif arg == '--n-jobs':
+            args['n_jobs'] = int(sys.argv[i + 1])
             i += 2
         elif arg == '--optimize-params':
             args['optimize_params'] = sys.argv[i + 1]

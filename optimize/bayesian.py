@@ -267,20 +267,25 @@ class BayesianOptimizer:
                 study.enqueue_trial(ws_params)
 
         def _objective(trial):
-            params = self._build_search_space(trial, param_defs, param_subset)
+            optimized_params = self._build_search_space(trial, param_defs, param_subset)
 
             strat = copy.deepcopy(strategy)
-            strat.set_params(params)
+            strat.set_params(optimized_params)
 
             engine = engine_factory()
             result = engine.run(strat, data, symbol, timeframe)
 
             obj_val = self._compute_objective(result)
 
-            # Store trial info
+            # Full snapshot: defaults + phase1 (from loaded strategy) + phase2 (optimized)
+            # This ensures ALL params persist across optimization phases
+            full_params = strat.default_params()
+            full_params.update(strat.params)
+
+            # Store trial info with FULL params
             bt = BayesianTrial(
                 trial_id=trial.number,
-                params=params,
+                params=full_params,
                 sharpe_ratio=result.sharpe_ratio,
                 total_return=result.total_return,
                 max_drawdown=result.max_drawdown,
@@ -303,11 +308,11 @@ class BayesianOptimizer:
                 # Compact param display — only show optimized params
                 if param_subset:
                     p_disp = {k: (f'{v:.2f}' if isinstance(v, float) else str(v))
-                              for k, v in params.items() if k in param_subset}
+                              for k, v in optimized_params.items() if k in param_subset}
                 else:
                     # Show top 4 most changed params
                     p_disp = {k: (f'{v:.2f}' if isinstance(v, float) else str(v))
-                              for k, v in list(params.items())[:4]}
+                              for k, v in list(optimized_params.items())[:4]}
 
                 params_str = str(p_disp).replace("'", "")
                 print(f"  {marker}{n:>4}/{self.n_trials} "
@@ -415,16 +420,19 @@ class BayesianOptimizer:
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         def _mo_objective(trial):
-            params = self._build_search_space(trial, param_defs, param_subset)
+            optimized_params = self._build_search_space(trial, param_defs, param_subset)
             strat = copy.deepcopy(strategy)
-            strat.set_params(params)
+            strat.set_params(optimized_params)
 
             engine = engine_factory()
             result = engine.run(strat, data, symbol, timeframe)
 
+            full_params = strat.default_params()
+            full_params.update(strat.params)
+
             bt = BayesianTrial(
                 trial_id=trial.number,
-                params=params,
+                params=full_params,
                 sharpe_ratio=result.sharpe_ratio,
                 total_return=result.total_return,
                 max_drawdown=result.max_drawdown,

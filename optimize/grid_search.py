@@ -457,20 +457,24 @@ class GridSearchOptimizer:
 
         try:
             for trial_id, combo in enumerate(all_combos):
-                params = dict(zip(keys, combo))
+                optimized_params = dict(zip(keys, combo))
 
                 t1 = time.time()
                 strat = copy.deepcopy(strategy)
-                strat.set_params(params)
+                strat.set_params(optimized_params)
 
                 engine = engine_factory()
                 result = engine.run(strat, data, symbol, timeframe)
 
                 obj_val = self.objective_fn(result) if result.n_trades >= self.min_trades else -999.0
 
+                # Full snapshot: defaults + loaded phase1 + optimized
+                full_params = strat.default_params()
+                full_params.update(strat.params)
+
                 trial = GridSearchTrial(
                     trial_id=trial_id,
-                    params=params,
+                    params=full_params,
                     sharpe_ratio=result.sharpe_ratio,
                     total_return=result.total_return,
                     sortino_ratio=result.sortino_ratio,
@@ -487,7 +491,7 @@ class GridSearchOptimizer:
                 if self.verbose:
                     # Show every trial with full metrics
                     marker = '★' if not trials or obj_val >= max(t.objective_value for t in trials) else ' '
-                    short_params = {k: (f'{v:.1f}' if isinstance(v, float) else str(v)) for k, v in params.items()}
+                    short_params = {k: (f'{v:.1f}' if isinstance(v, float) else str(v)) for k, v in optimized_params.items()}
                     params_str = str(short_params).replace("'", "")
                     print(f"  {marker}{trial_id+1:>3} {obj_val:>7.3f} "
                           f"{result.sharpe_ratio:>6.2f} {result.total_return:>+6.1f}% "
