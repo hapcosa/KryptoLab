@@ -137,11 +137,11 @@ class CyberCycleStrategy(IStrategy):
             #  slatr_tprr  → SL basado en ATR, TP basado en Risk:Reward
             #  sltp_fixed  → SL y TP como porcentaje fijo del entry price
             # ─────────────────────────────────────────────────────────
-            ParamDef('sltp_type', 'categorical', 'slatr_tprr',
+            ParamDef('sltp_type', 'categorical', 'sltp_fixed',
                      options=['slatr_tprr', 'sltp_fixed']),
 
             # ── Risk params: ATR mode (slatr_tprr) ──────────────────
-            ParamDef('leverage', 'float', 7.0, 1.0, 25.0, 1.0),
+            ParamDef('leverage', 'float', 7.0, 1.0, 60.0, 1.0),
             ParamDef('sl_atr_mult', 'float', 2.5, 0.5, 4.0, 0.1),
 
             # TP1 / TP2 — R:R multipliers sobre la distancia al SL
@@ -155,18 +155,18 @@ class CyberCycleStrategy(IStrategy):
             #      tp1_fixed_pct=2.0 → TP1 a +2.0% del entry
             #      tp2_fixed_pct=4.0 → TP2 a +4.0% del entry
             # ─────────────────────────────────────────────────────────
-            ParamDef('sl_fixed_pct', 'float', 1.5, 0.3, 5.0, 0.1),
-            ParamDef('tp1_fixed_pct', 'float', 2.0, 0.5, 8.0, 0.25),
-            ParamDef('tp1_fixed_size', 'float', 0.6, 0.1, 0.9, 0.05),
-            ParamDef('tp2_fixed_pct', 'float', 4.0, 1.0, 15.0, 0.5),
+            ParamDef('sl_fixed_pct', 'float', 1.0, 0.3, 5.0, 0.1),
+            ParamDef('tp1_fixed_pct', 'float', 1.2, 0.5, 8.0, 0.25),
+            ParamDef('tp1_fixed_size', 'float', 0.7, 0.1, 0.9, 0.05),
+            ParamDef('tp2_fixed_pct', 'float', 1.6, 1.0, 15.0, 0.5),
 
             # ── Break-even ──────────────────────────────────────────
-            ParamDef('be_pct', 'float', 1.5, 0.5, 3.0, 0.1),
+            ParamDef('be_pct', 'float', 0.8, 0.5, 3.0, 0.1),
 
             # ── Trailing stop ───────────────────────────────────────
             ParamDef('use_trailing', 'bool', True),
-            ParamDef('trail_activate_pct', 'float', 2.0, 1.0, 5.0, 0.25),
-            ParamDef('trail_pullback_pct', 'float', 1.0, 0.7, 2.5, 0.10),
+            ParamDef('trail_activate_pct', 'float', 1.4, 1.0, 5.0, 0.25),
+            ParamDef('trail_pullback_pct', 'float', 0.4, 0.7, 2.5, 0.10),
         ]
 
     # ─────────────────────────────────────────────────────────────

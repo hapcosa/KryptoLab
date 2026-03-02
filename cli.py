@@ -1411,12 +1411,13 @@ def main():
         elif arg == '--optimize-params':
             args['optimize_params'] = sys.argv[i + 1]
             i += 2
-        elif arg == '--trial':
-            args['trial'] = int(sys.argv[i + 1])
-            i += 2
         elif arg == '--exclude-params':
             args['exclude_params'] = sys.argv[i + 1]
             i += 2
+        elif arg == '--trial':
+            args['trial'] = int(sys.argv[i + 1])
+            i += 2
+
         elif not arg.startswith('--'):
             # Sub-command for 'data' command
             args['data_cmd'] = arg
