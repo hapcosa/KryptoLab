@@ -9,12 +9,6 @@ Changes v7.0 → v7.1:
   • Sltp_type = 'slatr_tprr' | 'sltp_fixed'
       - slatr_tprr  → SL = ATR × mult, TP = R:R sobre el riesgo (v7.0)
       - sltp_fixed   → SL y TP como % fijo del precio de entrada
-  • DCA (Dollar Cost Averaging) para futuros perpetuos:
-      - use_dca          → activar/desactivar
-      - dca_max_orders   → cantidad máxima de órdenes DCA (1-5)
-      - dca_step_pct     → distancia % entre cada nivel DCA
-      - dca_multiplier   → factor multiplicador del size en cada nivel
-      - dca_tp_after_avg → recalcular TP sobre precio promedio
 ─────────────────────────────────────────────────────────────────
 
 Filtros activos:
@@ -123,7 +117,7 @@ class CyberCycleStrategy(IStrategy):
             # ── Signal params ───────────────────────────────────────
             ParamDef('itrend_alpha', 'float', 0.07, 0.01, 0.30, 0.01),
             ParamDef('trigger_ema', 'int', 14, 3, 30, 3),
-            ParamDef('min_bars', 'int', 24, 24, 60, 2),
+            ParamDef('min_bars', 'int', 24, 16, 60, 2),
             ParamDef('confidence_min', 'float', 75.0, 40.0, 95.0, 5.0),
             ParamDef('ob_level', 'float', 1.5, 0.3, 3.0, 0.1),
             ParamDef('os_level', 'float', -1.5, -3.0, -0.3, 0.1),
@@ -147,7 +141,7 @@ class CyberCycleStrategy(IStrategy):
                      options=['slatr_tprr', 'sltp_fixed']),
 
             # ── Risk params: ATR mode (slatr_tprr) ──────────────────
-            ParamDef('leverage', 'float', 7.0, 10.0, 60.0, 1.0),
+            ParamDef('leverage', 'float', 7.0, 1.0, 25.0, 1.0),
             ParamDef('sl_atr_mult', 'float', 2.5, 0.5, 4.0, 0.1),
 
             # TP1 / TP2 — R:R multipliers sobre la distancia al SL
@@ -161,35 +155,18 @@ class CyberCycleStrategy(IStrategy):
             #      tp1_fixed_pct=2.0 → TP1 a +2.0% del entry
             #      tp2_fixed_pct=4.0 → TP2 a +4.0% del entry
             # ─────────────────────────────────────────────────────────
-            ParamDef('sl_fixed_pct', 'float', 1.0, 0.3, 5.0, 0.1),
-            ParamDef('tp1_fixed_pct', 'float', 1.0, 0.5, 8.0, 0.25),
-            ParamDef('tp1_fixed_size', 'float', 0.8, 0.1, 0.9, 0.05),
-            ParamDef('tp2_fixed_pct', 'float', 1.5, 1.0, 15.0, 0.5),
-
-            # ═════════════════════════════════════════════════════════
-            #  DCA — Dollar Cost Averaging
-            # ═════════════════════════════════════════════════════════
-            #  Cuando el precio se mueve contra la posición, se añaden
-            #  órdenes adicionales a niveles predefinidos para promediar
-            #  el entry price y acercar el TP.
-            #
-            #  El engine interpreta dca_levels[] y dca_sizes[] desde
-            #  el metadata de la señal para abrir sub-posiciones.
-            # ─────────────────────────────────────────────────────────
-            ParamDef('use_dca', 'bool', False),
-            ParamDef('dca_max_orders', 'int', 3, 1, 5),
-            ParamDef('dca_step_pct', 'float', 1.5, 0.5, 5.0, 0.25),
-            ParamDef('dca_multiplier', 'float', 1.5, 1.0, 3.0, 0.1),
-            ParamDef('dca_tp_after_avg', 'bool', True),
+            ParamDef('sl_fixed_pct', 'float', 1.5, 0.3, 5.0, 0.1),
+            ParamDef('tp1_fixed_pct', 'float', 2.0, 0.5, 8.0, 0.25),
+            ParamDef('tp1_fixed_size', 'float', 0.6, 0.1, 0.9, 0.05),
+            ParamDef('tp2_fixed_pct', 'float', 4.0, 1.0, 15.0, 0.5),
 
             # ── Break-even ──────────────────────────────────────────
-            ParamDef('be_pct', 'float', 0.8, 0.5, 3.0, 0.1),
+            ParamDef('be_pct', 'float', 1.5, 0.5, 3.0, 0.1),
 
             # ── Trailing stop ───────────────────────────────────────
             ParamDef('use_trailing', 'bool', True),
-            ParamDef('trail_activate_pct', 'float', 1.0, 1.0, 5.0, 0.25),
-            ParamDef('trail_pullback_pct', 'float', 0.5
-                     , 0.5, 2.5, 0.10),
+            ParamDef('trail_activate_pct', 'float', 2.0, 1.0, 5.0, 0.25),
+            ParamDef('trail_pullback_pct', 'float', 1.0, 0.7, 2.5, 0.10),
         ]
 
     # ─────────────────────────────────────────────────────────────
@@ -381,72 +358,6 @@ class CyberCycleStrategy(IStrategy):
         }
 
     # ─────────────────────────────────────────────────────────────
-    #  DCA LEVEL COMPUTATION
-    # ─────────────────────────────────────────────────────────────
-
-    def _compute_dca_levels(self, entry: float, direction: int,
-                            sl_price: float) -> dict:
-        """
-        Calcula niveles DCA para el engine.
-
-        Cada nivel DCA es un precio al que se abre una sub-posición
-        adicional si el precio va en contra.
-
-        Retorna:
-          dca_levels:  [precio_dca_1, precio_dca_2, ...]
-          dca_sizes:   [mult_1, mult_2, ...]  — factor × base_size
-          dca_avg_entry: precio promedio ponderado si se llenan todos
-
-        Lógica:
-          - Nivel k está a entry ∓ (k × step_pct)%
-          - Size k = base × multiplier^k
-          - El SL se mantiene fijo (no se recalcula)
-          - El TP se recalcula sobre avg_entry si dca_tp_after_avg=True
-        """
-        if not self.get_param('use_dca', False):
-            return {'dca_enabled': False}
-
-        max_orders = self.get_param('dca_max_orders', 3)
-        step_pct = self.get_param('dca_step_pct', 1.5) / 100.0
-        multiplier = self.get_param('dca_multiplier', 1.5)
-
-        dca_levels = []
-        dca_sizes = []
-
-        # Peso acumulado para calcular avg entry
-        # Base order tiene peso 1.0
-        total_weight = 1.0
-        weighted_sum = entry * 1.0
-
-        for k in range(1, max_orders + 1):
-            # Nivel k: precio contra la dirección
-            level_price = entry * (1.0 - direction * step_pct * k)
-
-            # Validar que el DCA level no sobrepase el SL
-            if direction == 1 and level_price <= sl_price:
-                break  # No poner DCA debajo del SL en long
-            if direction == -1 and level_price >= sl_price:
-                break  # No poner DCA arriba del SL en short
-
-            size_mult = multiplier ** k
-            dca_levels.append(level_price)
-            dca_sizes.append(size_mult)
-
-            total_weight += size_mult
-            weighted_sum += level_price * size_mult
-
-        avg_entry = weighted_sum / total_weight if total_weight > 0 else entry
-
-        return {
-            'dca_enabled': True,
-            'dca_levels': dca_levels,
-            'dca_sizes': dca_sizes,
-            'dca_avg_entry': avg_entry,
-            'dca_total_weight': total_weight,
-            'dca_max_orders': len(dca_levels),
-        }
-
-    # ─────────────────────────────────────────────────────────────
     #  SIGNAL GENERATION
     # ─────────────────────────────────────────────────────────────
 
@@ -514,32 +425,6 @@ class CyberCycleStrategy(IStrategy):
         tp_levels = sltp['tp_levels']
         tp_sizes = sltp['tp_sizes']
         sl_dist = sltp['sl_dist']
-        risk = sltp['risk']
-
-        # ── DCA computation ──────────────────────────────────────
-        dca_info = self._compute_dca_levels(entry, direction, sl)
-
-        # Si DCA activo y dca_tp_after_avg=True, recalcular TP
-        # sobre el precio promedio en lugar del entry original
-        if (dca_info.get('dca_enabled', False)
-                and self.get_param('dca_tp_after_avg', True)
-                and dca_info['dca_max_orders'] > 0):
-            avg_entry = dca_info['dca_avg_entry']
-            if sltp_type == 'sltp_fixed':
-                tp1_pct = self.get_param('tp1_fixed_pct', 2.0) / 100.0
-                tp2_pct = self.get_param('tp2_fixed_pct', 4.0) / 100.0
-                tp_levels = [
-                    avg_entry * (1.0 + direction * tp1_pct),
-                    avg_entry * (1.0 + direction * tp2_pct),
-                ]
-            else:
-                tp1_rr = self.get_param('tp1_rr', 2.0)
-                tp2_rr = self.get_param('tp2_rr', 4.0)
-                avg_risk = abs(avg_entry - sl)
-                tp_levels = [
-                    avg_entry + direction * avg_risk * tp1_rr,
-                    avg_entry + direction * avg_risk * tp2_rr,
-                ]
 
         # ── Break-even ──────────────────────────────────────────
         be_pct = self.get_param('be_pct', 1.5)
@@ -566,36 +451,6 @@ class CyberCycleStrategy(IStrategy):
         else:
             trailing_distance = 0.0
 
-        # ── Build metadata ──────────────────────────────────────
-        meta = {
-            'close_on_signal': True,
-            'max_signals_per_day': 0,
-            'alpha_method': self.get_param('alpha_method'),
-            'alpha': ind['alpha'][idx],
-            'period': ind['period'][idx],
-            'cycle': ind['cycle'][idx],
-            'fisher': ind['fisher'][idx],
-            'cycle_strength': float(ind['abs_cycle'][idx]),
-            'sltp_mode': sltp_type,
-            'sl_dist_atr': sl_dist / atr_val if atr_val > 0 else 0,
-            'tp1': tp_levels[0] if tp_levels else 0,
-            'tp2': tp_levels[1] if len(tp_levels) > 1 else 0,
-            'be_pct': be_pct,
-            'trail_pct': self.get_param('trail_pullback_pct', 1.0) if use_trailing else 0,
-        }
-
-        # Adjuntar DCA info al metadata para que el engine lo procese
-        if dca_info.get('dca_enabled', False):
-            meta['dca_enabled'] = True
-            meta['dca_levels'] = dca_info['dca_levels']
-            meta['dca_sizes'] = dca_info['dca_sizes']
-            meta['dca_avg_entry'] = dca_info['dca_avg_entry']
-            meta['dca_total_weight'] = dca_info['dca_total_weight']
-            meta['dca_max_orders'] = dca_info['dca_max_orders']
-            meta['dca_filled'] = [False] * dca_info['dca_max_orders']
-        else:
-            meta['dca_enabled'] = False
-
         return Signal(
             direction=direction,
             confidence=conf,
@@ -607,5 +462,20 @@ class CyberCycleStrategy(IStrategy):
             be_trigger=be_trigger,
             trailing=use_trailing,
             trailing_distance=trailing_distance,
-            metadata=meta,
+            metadata={
+                'close_on_signal': True,
+                'max_signals_per_day': 0,
+                'alpha_method': self.get_param('alpha_method'),
+                'alpha': ind['alpha'][idx],
+                'period': ind['period'][idx],
+                'cycle': ind['cycle'][idx],
+                'fisher': ind['fisher'][idx],
+                'cycle_strength': float(ind['abs_cycle'][idx]),
+                'sltp_mode': sltp_type,
+                'sl_dist_atr': sl_dist / atr_val if atr_val > 0 else 0,
+                'tp1': tp_levels[0] if tp_levels else 0,
+                'tp2': tp_levels[1] if len(tp_levels) > 1 else 0,
+                'be_pct': be_pct,
+                'trail_pct': self.get_param('trail_pullback_pct', 1.0) if use_trailing else 0,
+            }
         )
