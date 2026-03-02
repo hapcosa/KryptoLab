@@ -14,6 +14,11 @@ Each layer addresses a different type of overfitting risk:
   - Purged K-Fold: Does performance hold on unseen segments?
   - DSR: Is the Sharpe statistically significant given N trials?
   - Monte Carlo: Could this result occur by chance?
+
+FIX v7.1: DSR now uses EFFECTIVE n_trials that accounts for conditional
+parameter dependencies (alpha_method, sl_tp_mode). Previously it counted
+ALL grid combos including inactive params (homodyne params when using
+kalman, etc.), inflating E[max SR] and rejecting valid strategies.
 """
 import numpy as np
 import copy
@@ -29,6 +34,9 @@ from optimize.deflated_sharpe import (
 )
 from optimize.monte_carlo import (
     run_full_monte_carlo, MonteCarloResult
+)
+from optimize.param_dependencies import (
+    compute_effective_n_trials, count_effective_params
 )
 
 
@@ -100,7 +108,7 @@ class AntiOverfitResult:
             lines.append(f"     DSR: {self.dsr_result.deflated_sharpe:.3f}"
                          f"  (threshold: 0.5)")
             lines.append(f"     Observed SR: {self.dsr_result.observed_sharpe:.2f}"
-                         f"  E[max SR|{self.dsr_result.n_trials} trials]: "
+                         f"  E[max SR|{self.dsr_result.n_trials} eff. trials]: "
                          f"{self.dsr_result.expected_max_sharpe:.2f}")
             lines.append(f"     Skew: {self.dsr_result.skewness:.2f}"
                          f"  Kurt: {self.dsr_result.kurtosis:.2f}")
@@ -205,10 +213,35 @@ class AntiOverfitPipeline:
             print("  ANTI-OVERFITTING PIPELINE")
             print("═" * 60)
 
-        # Count total param combos for DSR
-        n_trials = 1
+        # ── Compute EFFECTIVE n_trials for DSR ───────────────────
+        # Accounts for conditional dependencies:
+        #   - alpha_method: only count active method params
+        #   - sl_tp_mode: only count active SL/TP params
+        # This prevents inflating E[max SR] with dead dimensions.
+        #
+        # Example: alpha_method=kalman → homodyne/mama/autocorrelation
+        # params are inactive → excluded from trial count.
+        current_params = {}
+        if hasattr(strategy, 'get_all_params'):
+            current_params = strategy.get_all_params()
+        elif hasattr(strategy, 'params'):
+            current_params = strategy.params
+
+        n_trials_total = 1
         for v in param_grid.values():
-            n_trials *= len(v)
+            n_trials_total *= len(v)
+
+        n_trials = compute_effective_n_trials(
+            param_grid, params=current_params
+        )
+
+        if self.verbose and n_trials != n_trials_total:
+            am = current_params.get('alpha_method', '?')
+            n_eff_params = count_effective_params(
+                strategy.parameter_defs(), params=current_params
+            ) if hasattr(strategy, 'parameter_defs') else '?'
+            print(f"  ℹ️  n_trials: {n_trials_total} total → {n_trials} effective "
+                  f"(alpha={am}, {n_eff_params} active params)")
 
         # ═══════════════════════════════════════════════════
         # LAYER 1: Walk-Forward Analysis
@@ -298,9 +331,17 @@ class AntiOverfitPipeline:
         # Compute correct annualization for this timeframe
         ann = _annualization_factor(timeframe)
 
+        # ── FIX v7.1: Recompute effective n_trials using BEST params ──
+        # After WFA, we know the best alpha_method/sl_tp_mode.
+        # Recalculate with the actual winning configuration.
+        dsr_params = best_params if best_params else current_params
+        n_trials_dsr = compute_effective_n_trials(
+            param_grid, params=dsr_params
+        )
+
         dsr_result = compute_dsr_from_backtest(
             equity_curve=full_result.equity_curve,
-            n_trials=n_trials,
+            n_trials=n_trials_dsr,
             threshold=self.dsr_threshold,
             annualization=ann,
         )
@@ -309,12 +350,21 @@ class AntiOverfitPipeline:
 
         if self.verbose:
             status = "✅ PASS" if dsr_result.passed else "❌ REJECT"
+            # Show effective param info
+            am = dsr_params.get('alpha_method', '?')
+            n_eff = count_effective_params(
+                strategy.parameter_defs(), params=dsr_params
+            ) if hasattr(strategy, 'parameter_defs') else '?'
             print(f"  DSR Result: {status}")
             print(f"    DSR = {dsr_result.deflated_sharpe:.3f} "
                   f"(threshold: {self.dsr_threshold})")
             print(f"    Observed SR: {dsr_result.observed_sharpe:.2f}  "
-                  f"E[max SR|{n_trials} trials]: "
+                  f"E[max SR|{n_trials_dsr} eff. trials]: "
                   f"{dsr_result.expected_max_sharpe:.2f}")
+            if n_trials_dsr != n_trials_total:
+                print(f"    Effective params: {n_eff} "
+                      f"(alpha={am}, {n_trials_total} total → "
+                      f"{n_trials_dsr} effective trials)")
 
         if self.fail_fast and not result.dsr_passed:
             result.rejection_layer = "Deflated Sharpe Ratio"

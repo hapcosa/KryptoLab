@@ -665,17 +665,37 @@ def cmd_optimize(args):
     # Load params from JSON as warm start baseline
     _load_params_file(args, strategy)
 
-    # Parse --optimize-params (comma-separated list of param names)
     param_subset = None
+    valid_names = {pd.name for pd in strategy.parameter_defs()}
+
     opt_params_str = args.get('optimize_params')
+    excl_params_str = args.get('exclude_params')
+
     if opt_params_str:
+        # Explicit include list (existing behavior)
         param_subset = [p.strip() for p in opt_params_str.split(',')]
-        valid_names = {pd.name for pd in strategy.parameter_defs()}
         invalid = [p for p in param_subset if p not in valid_names]
         if invalid:
             print(f"   ⚠️  Unknown params: {', '.join(invalid)}")
             print(f"       Valid: {', '.join(sorted(valid_names))}")
             param_subset = [p for p in param_subset if p in valid_names]
+
+    elif excl_params_str:
+        # Exclude list → param_subset = all EXCEPT excluded
+        excluded = {p.strip() for p in excl_params_str.split(',')}
+        invalid = excluded - valid_names
+        if invalid:
+            print(f"   ⚠️  Unknown params to exclude: {', '.join(invalid)}")
+            print(f"       Valid: {', '.join(sorted(valid_names))}")
+        excluded &= valid_names  # Only keep valid names
+
+        # Build subset = all params minus excluded
+        param_subset = [pd.name for pd in strategy.parameter_defs()
+                        if pd.name not in excluded]
+
+        if excluded:
+            print(f"   🚫 Excluded {len(excluded)} params: {', '.join(sorted(excluded))}")
+            print(f"   ✅ Optimizing {len(param_subset)} of {len(valid_names)} params")
 
     data, detail_info, symbol, tf = _load_data(args)
     engine_factory = _make_engine_factory(capital, detail_info)
@@ -1394,10 +1414,14 @@ def main():
         elif arg == '--trial':
             args['trial'] = int(sys.argv[i + 1])
             i += 2
+        elif arg == '--exclude-params':
+            args['exclude_params'] = sys.argv[i + 1]
+            i += 2
         elif not arg.startswith('--'):
             # Sub-command for 'data' command
             args['data_cmd'] = arg
             i += 1
+
         else:
             i += 1
 

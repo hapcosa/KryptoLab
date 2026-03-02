@@ -7,6 +7,7 @@ Features:
 - TPE sampler (better than random for structured spaces)
 - Median pruning (early stop losing trials)
 - Multi-objective support (Sharpe + Drawdown)
+- Conditional spaces: alpha_method + sltp_type (v7.1)
 - Integration with anti-overfit pipeline (returns n_trials for DSR)
 - Warm start from grid search results
 
@@ -25,6 +26,13 @@ try:
     HAS_OPTUNA = True
 except ImportError:
     HAS_OPTUNA = False
+
+# ── Single source of truth for parameter dependencies ──
+from optimize.param_dependencies import (
+    ALPHA_METHOD_PARAMS, ALL_METHOD_PARAMS,
+    SLTP_MODE_PARAMS, ALL_SLTP_PARAMS,
+    count_effective_params,
+)
 
 
 @dataclass
@@ -64,6 +72,10 @@ class BayesianOptimizer:
     TPE models P(params|good) and P(params|bad) separately, then samples
     from the ratio — focusing search on promising regions.
 
+    Conditional spaces (v7.1):
+      - alpha_method → only relevant alpha sub-params explored
+      - sltp_type    → only relevant SL/TP params explored
+
     Typical usage: 100-500 trials for 10-30 parameter strategies.
     """
 
@@ -76,17 +88,6 @@ class BayesianOptimizer:
                  seed: int = 42,
                  n_jobs: int = 1,
                  verbose: bool = True):
-        """
-        Args:
-            n_trials: Maximum number of trials
-            objective: 'sharpe', 'return', 'composite'
-            min_trades: Minimum trades for valid trial
-            timeout_seconds: Max wall time (None = unlimited)
-            pruning: Enable median pruner
-            seed: Random seed for reproducibility
-            n_jobs: Parallel workers (1=sequential, -1=auto)
-            verbose: Print progress
-        """
         if not HAS_OPTUNA:
             raise ImportError("Optuna required: pip install optuna")
 
@@ -98,25 +99,13 @@ class BayesianOptimizer:
         self.seed = seed
         self.n_jobs = n_jobs
         self.verbose = verbose
-        self.last_result = None  # Stores partial result for Ctrl+C recovery
+        self.last_result = None
 
-    # ── Conditional parameter groups ──
-    # Params that only matter for specific alpha_method values.
-    # When alpha_method='mama', kalman/homodyne/autocorrelation params are ignored
-    # by the strategy, so we skip them in the search space to avoid wasting trials.
-    ALPHA_METHOD_PARAMS = {
-        'manual':          {'manual_alpha'},
-        'homodyne':        {'hd_min_period', 'hd_max_period', 'alpha_floor'},
-        'mama':            {'mama_fast', 'mama_slow', 'alpha_floor'},
-        'autocorrelation': {'ac_min_period', 'ac_max_period', 'ac_avg_length', 'alpha_floor'},
-        'kalman':          {'kal_process_noise', 'kal_meas_noise',
-                            'kal_alpha_fast', 'kal_alpha_slow', 'kal_sensitivity', 'alpha_floor'},
-    }
-
-    # All method-specific params (union of all groups)
-    ALL_METHOD_PARAMS = set()
-    for v in ALPHA_METHOD_PARAMS.values():
-        ALL_METHOD_PARAMS |= v
+    # ── Conditional parameter groups (imported from param_dependencies) ──
+    ALPHA_METHOD_PARAMS = ALPHA_METHOD_PARAMS
+    ALL_METHOD_PARAMS = ALL_METHOD_PARAMS
+    SLTP_MODE_PARAMS = SLTP_MODE_PARAMS
+    ALL_SLTP_PARAMS = ALL_SLTP_PARAMS
 
     def _build_search_space(self, trial: 'optuna.Trial',
                             param_defs: list,
@@ -124,16 +113,18 @@ class BayesianOptimizer:
         """
         Construct Optuna search space from ParamDef list.
 
-        Uses conditional parameter spaces: alpha_method is suggested first,
-        then only the relevant method-specific params are suggested.
-        Other method params use strategy defaults (not optimized).
+        Uses TWO conditional parameter spaces:
+          1. alpha_method → only relevant alpha sub-params suggested
+          2. sltp_type    → only relevant SL/TP params suggested
 
-        This reduces effective dimensionality from ~35 to ~22 params,
+        This reduces effective dimensionality significantly,
         making TPE much more efficient.
         """
         params = {}
 
-        # Phase 1: Determine alpha_method (suggest or use default)
+        # ═══════════════════════════════════════════════════════════
+        #  Phase 1: Determine alpha_method (suggest or use default)
+        # ═══════════════════════════════════════════════════════════
         alpha_method = None
         alpha_pdef = None
         for pdef in param_defs:
@@ -149,18 +140,45 @@ class BayesianOptimizer:
                 alpha_method = alpha_pdef.default
             params['alpha_method'] = alpha_method
 
-        # Phase 2: Determine which method-specific params to include
-        active_params = self.ALPHA_METHOD_PARAMS.get(alpha_method, set()) if alpha_method else set()
-        skip_params = self.ALL_METHOD_PARAMS - active_params  # Skip irrelevant method params
+        # Determine which alpha params to skip
+        active_alpha = self.ALPHA_METHOD_PARAMS.get(alpha_method, set()) if alpha_method else set()
+        skip_alpha = self.ALL_METHOD_PARAMS - active_alpha
 
-        # Phase 3: Suggest remaining params
+        # ═══════════════════════════════════════════════════════════
+        #  Phase 2: Determine sltp_type (suggest or use default)
+        # ═══════════════════════════════════════════════════════════
+        sltp_type = None
+        sltp_pdef = None
         for pdef in param_defs:
-            if pdef.name == 'alpha_method':
-                continue  # Already handled
+            if pdef.name == 'sltp_type':
+                sltp_pdef = pdef
+                break
+
+        if sltp_pdef:
+            if param_subset is None or 'sltp_type' in param_subset:
+                sltp_type = trial.suggest_categorical(
+                    'sltp_type', sltp_pdef.options)
+            else:
+                sltp_type = sltp_pdef.default
+            params['sltp_type'] = sltp_type
+
+        # Determine which sltp params to skip
+        active_sltp = self.SLTP_MODE_PARAMS.get(sltp_type, set()) if sltp_type else set()
+        skip_sltp = self.ALL_SLTP_PARAMS - active_sltp
+
+        # Combined skip set
+        skip_params = skip_alpha | skip_sltp
+
+        # ═══════════════════════════════════════════════════════════
+        #  Phase 3: Suggest remaining params
+        # ═══════════════════════════════════════════════════════════
+        for pdef in param_defs:
+            if pdef.name in ('alpha_method', 'sltp_type'):
+                continue  # Already handled in Phase 1/2
             if param_subset and pdef.name not in param_subset:
                 continue  # User excluded this param
             if pdef.name in skip_params:
-                continue  # Irrelevant for current alpha_method
+                continue  # Irrelevant for current mode
 
             if pdef.ptype == 'float':
                 val = trial.suggest_float(
@@ -184,33 +202,41 @@ class BayesianOptimizer:
 
     def _compute_objective(self, result) -> float:
         """Compute objective value from BacktestResult using shared objective functions."""
-        if result.n_trades < self.min_trades:
-            return -999.0
+        from optimize.grid_search import (
+            objective_sharpe, objective_return, objective_composite,
+            objective_calmar, objective_monthly, objective_monthly_robust,
+            objective_weekly, objective_weekly_robust,
+        )
+        obj_map = {
+            'sharpe': objective_sharpe,
+            'return': objective_return,
+            'composite': objective_composite,
+            'calmar': objective_calmar,
+            'monthly': objective_monthly,
+            'monthly_robust': objective_monthly_robust,
+            'weekly': objective_weekly,
+            'weekly_robust': objective_weekly_robust,
+        }
+        fn = obj_map.get(self.objective_name, objective_sharpe)
+        return fn(result)
 
-        # Use the centralized objective functions from grid_search
-        try:
-            from optimize.grid_search import OBJECTIVES
-            fn = OBJECTIVES.get(self.objective_name)
-            if fn:
-                return fn(result)
-        except ImportError:
-            pass
+    def _print_header(self, param_defs, param_subset):
+        """Print optimization header with effective param count."""
+        n_params = len(param_subset) if param_subset else len(param_defs)
+        # Worst case effective count (largest alpha + largest sltp)
+        max_alpha = max(len(v) for v in self.ALPHA_METHOD_PARAMS.values())
+        max_sltp = max(len(v) for v in self.SLTP_MODE_PARAMS.values())
+        n_conditional = len(self.ALL_METHOD_PARAMS) + len(self.ALL_SLTP_PARAMS)
+        n_effective = n_params - n_conditional + max_alpha + max_sltp
 
-        # Fallback: inline objectives
-        if self.objective_name == 'sharpe':
-            return result.sharpe_ratio
-        elif self.objective_name == 'return':
-            return result.total_return
-        elif self.objective_name == 'calmar':
-            return result.calmar_ratio
-        elif self.objective_name == 'composite':
-            sr = max(0, result.sharpe_ratio)
-            pf = min(5, result.profit_factor) / 5.0 if result.profit_factor > 0 else 0
-            cal = min(5, result.calmar_ratio) / 5.0 if result.calmar_ratio > 0 else 0
-            wr = result.win_rate / 100.0
-            return sr * 0.4 + pf * 0.2 + cal * 0.2 + wr * 0.2
-        else:
-            return result.sharpe_ratio
+        print(f"\n  Bayesian Optimizer (TPE): {self.n_trials} trials, "
+              f"{n_params} params ({n_effective} effective), objective={self.objective_name}")
+        if param_subset:
+            print(f"  Optimizing: {', '.join(param_subset)}")
+        print(f"  Conditional spaces: alpha_method + sltp_type → only relevant sub-params explored")
+        print(f"  {'─' * 80}")
+
+    # ─── Sequential optimization ─────────────────────────────────
 
     def run(self,
             strategy,
@@ -221,7 +247,7 @@ class BayesianOptimizer:
             param_subset: Optional[List[str]] = None,
             warm_start: Optional[List[Dict[str, Any]]] = None,
             engine_config: dict = None
-            ) -> BayesianResult:
+            ) -> 'BayesianResult':
         """
         Execute Bayesian optimization.
 
@@ -240,38 +266,32 @@ class BayesianOptimizer:
         """
         if self.n_jobs > 1 and engine_config is not None:
             return self._run_parallel(
-                strategy, data, engine_factory, symbol, timeframe,
+                strategy, data, engine_factory,
+                symbol, timeframe,
                 param_subset, warm_start, engine_config)
-        else:
-            return self._run_sequential(
-                strategy, data, engine_factory, symbol, timeframe,
-                param_subset, warm_start)
 
-    def _run_sequential(self,
-                         strategy, data, engine_factory,
-                         symbol, timeframe, param_subset, warm_start):
-        """Original sequential optimization."""
+        return self._run_sequential(
+            strategy, data, engine_factory,
+            symbol, timeframe,
+            param_subset, warm_start)
+
+    def _run_sequential(self, strategy, data, engine_factory,
+                         symbol="", timeframe="",
+                         param_subset=None,
+                         warm_start=None) -> 'BayesianResult':
+        """Sequential Bayesian optimization."""
         t0 = time.time()
         param_defs = strategy.parameter_defs()
         all_trials = []
 
         if self.verbose:
-            n_params = len(param_subset) if param_subset else len(param_defs)
-            n_method = len(self.ALL_METHOD_PARAMS)
-            n_effective = n_params - n_method + max(len(v) for v in self.ALPHA_METHOD_PARAMS.values())
-            print(f"\n  Bayesian Optimizer (TPE): {self.n_trials} trials, "
-                  f"{n_params} params ({n_effective} effective), objective={self.objective_name}")
-            if param_subset:
-                print(f"  Optimizing: {', '.join(param_subset)}")
-            print(f"  Conditional spaces: alpha_method → only relevant sub-params explored")
-            print(f"  {'─' * 80}")
+            self._print_header(param_defs, param_subset)
 
         # Configure Optuna
         sampler = TPESampler(seed=self.seed, n_startup_trials=20)
         pruner = MedianPruner(n_startup_trials=10) if self.pruning else optuna.pruners.NopPruner()
 
-        verbosity = optuna.logging.WARNING if not self.verbose else optuna.logging.WARNING
-        optuna.logging.set_verbosity(verbosity)
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         study = optuna.create_study(
             direction="maximize",
@@ -279,7 +299,7 @@ class BayesianOptimizer:
             pruner=pruner,
         )
 
-        # Warm start: enqueue known good configs
+        # Warm start
         if warm_start:
             for ws_params in warm_start[:10]:
                 study.enqueue_trial(ws_params)
@@ -293,17 +313,15 @@ class BayesianOptimizer:
             engine = engine_factory()
             result = engine.run(strat, data, symbol, timeframe)
 
+            if result.n_trades < self.min_trades:
+                return -999.0
+
             obj_val = self._compute_objective(result)
 
-            # Full snapshot: defaults + phase1 (from loaded strategy) + phase2 (optimized)
-            # This ensures ALL params persist across optimization phases
-            full_params = strat.default_params()
-            full_params.update(strat.params)
-
-            # Store trial info with FULL params
+            # Store trial data
             bt = BayesianTrial(
                 trial_id=trial.number,
-                params=full_params,
+                params=optimized_params,
                 sharpe_ratio=result.sharpe_ratio,
                 total_return=result.total_return,
                 max_drawdown=result.max_drawdown,
@@ -315,25 +333,25 @@ class BayesianOptimizer:
             all_trials.append(bt)
 
             if self.verbose:
-                try:
-                    best_val = study.best_value
-                except (ValueError, AttributeError):
-                    best_val = obj_val
-                is_best = obj_val >= best_val
-                marker = '★' if is_best else ' '
-                n = trial.number + 1
+                best_so_far = max((t.objective_value for t in all_trials), default=-999)
+                marker = '★' if obj_val >= best_so_far else ' '
 
-                # Compact param display — only show optimized params
                 if param_subset:
                     p_disp = {k: (f'{v:.2f}' if isinstance(v, float) else str(v))
                               for k, v in optimized_params.items() if k in param_subset}
                 else:
-                    # Show top 4 most changed params
-                    p_disp = {k: (f'{v:.2f}' if isinstance(v, float) else str(v))
-                              for k, v in list(optimized_params.items())[:4]}
+                    # Show mode selectors + top varying params
+                    p_disp = {}
+                    for k in ('alpha_method', 'sltp_type'):
+                        if k in optimized_params:
+                            p_disp[k] = str(optimized_params[k])
+                    remaining = {k: v for k, v in optimized_params.items()
+                                 if k not in ('alpha_method', 'sltp_type')}
+                    for k, v in list(remaining.items())[:3]:
+                        p_disp[k] = f'{v:.2f}' if isinstance(v, float) else str(v)
 
                 params_str = str(p_disp).replace("'", "")
-                print(f"  {marker}{n:>4}/{self.n_trials} "
+                print(f"  {marker}{trial.number+1:>4}/{self.n_trials} "
                       f"obj={obj_val:>7.3f} "
                       f"SR={result.sharpe_ratio:>5.2f} "
                       f"Ret={result.total_return:>+6.1f}% "
@@ -345,7 +363,7 @@ class BayesianOptimizer:
 
             return obj_val
 
-        # Run optimization (Ctrl+C → graceful stop, show partial results)
+        # Run optimization
         interrupted = False
         try:
             study.optimize(
@@ -359,13 +377,12 @@ class BayesianOptimizer:
             if self.verbose:
                 print(f"\n  ⚠️  Interrupted after {len(all_trials)} trials — compiling partial results...")
 
-        # Extract results (works with partial data too)
+        # Compile results
         all_trials.sort(key=lambda t: t.objective_value, reverse=True)
 
         best = all_trials[0] if all_trials else None
         best_params = best.params if best else {}
 
-        # Parameter importances
         importances = {}
         try:
             imp = optuna.importance.get_param_importances(study)
@@ -382,40 +399,33 @@ class BayesianOptimizer:
             n_complete = len(all_trials)
             n_pruned = 0
 
+        elapsed = time.time() - t0
+
         result = BayesianResult(
-            trials=all_trials[:50],  # Keep top 50
+            trials=all_trials,
             best_trial=best,
             best_params=best_params,
-            n_trials_total=n_complete + n_pruned,
+            n_trials_total=len(all_trials),
             n_trials_complete=n_complete,
             n_trials_pruned=n_pruned,
-            elapsed_seconds=time.time() - t0,
+            elapsed_seconds=elapsed,
             objective_name=self.objective_name,
             param_importances=importances,
         )
-        self.last_result = result  # Store for Ctrl+C recovery from CLI
 
-        if self.verbose and best:
-            status = "INTERRUPTED" if interrupted else "Complete"
-            print(f"\n  {'═' * 60}")
-            print(f"  Bayesian Optimization {status} ({result.elapsed_seconds:.1f}s)")
-            print(f"  Trials: {n_complete} complete, {n_pruned} pruned")
-            print(f"  Best: obj={best.objective_value:.3f} "
-                  f"SR={best.sharpe_ratio:.2f} Ret={best.total_return:+.1f}% "
-                  f"WR={best.win_rate:.1f}% DD={best.max_drawdown:.1f}%")
-            if importances:
-                top_imp = sorted(importances.items(),
-                                key=lambda x: x[1], reverse=True)[:5]
-                print(f"  Importances: {', '.join(f'{k}={v:.2f}' for k,v in top_imp)}")
+        self.last_result = result
+
+        if self.verbose:
+            self._print_summary(result, interrupted)
 
         return result
 
-    def _run_parallel(self,
-                       strategy, data, engine_factory,
-                       symbol, timeframe, param_subset,
-                       warm_start, engine_config):
+    def _run_parallel(self, strategy, data, engine_factory,
+                       symbol="", timeframe="",
+                       param_subset=None,
+                       warm_start=None, engine_config=None) -> 'BayesianResult':
         """
-        Parallel Bayesian optimization using batch ask/tell.
+        Parallel Bayesian optimization using ask-and-tell API.
 
         Flow per batch:
           1. Main process: study.ask() × batch_size → trials
@@ -431,18 +441,10 @@ class BayesianOptimizer:
         batch_size = self.n_jobs
 
         if self.verbose:
-            n_params = len(param_subset) if param_subset else len(param_defs)
-            n_method = len(self.ALL_METHOD_PARAMS)
-            n_effective = n_params - n_method + max(len(v) for v in self.ALPHA_METHOD_PARAMS.values())
-            print(f"\n  Bayesian Optimizer (TPE): {self.n_trials} trials, "
-                  f"{n_params} params ({n_effective} effective), objective={self.objective_name}")
+            self._print_header(param_defs, param_subset)
             print(f"  ⚡ Parallel: {self.n_jobs} workers, batch_size={batch_size}")
-            if param_subset:
-                print(f"  Optimizing: {', '.join(param_subset)}")
-            print(f"  Conditional spaces: alpha_method → only relevant sub-params explored")
-            print(f"  {'─' * 80}")
 
-        # Configure Optuna (single-threaded study, parallel evaluation)
+        # Configure Optuna
         sampler = TPESampler(seed=self.seed, n_startup_trials=20)
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -451,12 +453,11 @@ class BayesianOptimizer:
             sampler=sampler,
         )
 
-        # Warm start
         if warm_start:
             for ws_params in warm_start[:10]:
                 study.enqueue_trial(ws_params)
 
-        # Setup shared state for workers (fork COW)
+        # Setup shared state for workers
         setup_workers(
             strategy=strategy,
             data=data,
@@ -474,36 +475,32 @@ class BayesianOptimizer:
         try:
             with create_pool(self.n_jobs) as pool:
                 while completed < self.n_trials:
-                    # Check timeout
                     if self.timeout and (time.time() - t0) > self.timeout:
                         break
 
-                    # Determine batch size for this iteration
                     remaining = self.n_trials - completed
                     current_batch = min(batch_size, remaining)
 
-                    # ── Phase 1: Ask + suggest params (main process, fast) ──
+                    # Phase 1: Ask + suggest params (main process, fast)
                     batch_items = []
                     for _ in range(current_batch):
                         trial = study.ask()
                         params = self._build_search_space(trial, param_defs, param_subset)
                         batch_items.append((trial, params))
 
-                    # ── Phase 2: Evaluate in parallel (workers, slow) ──
+                    # Phase 2: Evaluate in parallel (workers, slow)
                     work_items = [
                         (completed + i, params)
                         for i, (_, params) in enumerate(batch_items)
                     ]
                     results = pool.map(evaluate_trial, work_items)
 
-                    # ── Phase 3: Tell study + collect results (main process, fast) ──
+                    # Phase 3: Tell study + collect results (main process, fast)
                     for (optuna_trial, optimized_params), res in zip(batch_items, results):
                         obj_val = res['objective_value']
 
-                        # Tell Optuna the result
                         study.tell(optuna_trial, obj_val)
 
-                        # Store in our trial list
                         bt = BayesianTrial(
                             trial_id=res['trial_id'],
                             params=res['params'],
@@ -529,8 +526,14 @@ class BayesianOptimizer:
                                 p_disp = {k: (f'{v:.2f}' if isinstance(v, float) else str(v))
                                           for k, v in optimized_params.items() if k in param_subset}
                             else:
-                                p_disp = {k: (f'{v:.2f}' if isinstance(v, float) else str(v))
-                                          for k, v in list(optimized_params.items())[:4]}
+                                p_disp = {}
+                                for k in ('alpha_method', 'sltp_type'):
+                                    if k in optimized_params:
+                                        p_disp[k] = str(optimized_params[k])
+                                remaining_p = {k: v for k, v in optimized_params.items()
+                                               if k not in ('alpha_method', 'sltp_type')}
+                                for k, v in list(remaining_p.items())[:3]:
+                                    p_disp[k] = f'{v:.2f}' if isinstance(v, float) else str(v)
 
                             params_str = str(p_disp).replace("'", "")
                             print(f"  {marker}{completed:>4}/{self.n_trials} "
@@ -551,7 +554,7 @@ class BayesianOptimizer:
         finally:
             cleanup_workers()
 
-        # Compile results (same as sequential)
+        # Compile results
         all_trials.sort(key=lambda t: t.objective_value, reverse=True)
 
         best = all_trials[0] if all_trials else None
@@ -573,110 +576,63 @@ class BayesianOptimizer:
             n_complete = len(all_trials)
             n_pruned = 0
 
+        elapsed = time.time() - t0
+
         result = BayesianResult(
-            trials=all_trials[:50],
+            trials=all_trials,
             best_trial=best,
             best_params=best_params,
-            n_trials_total=n_complete + n_pruned,
+            n_trials_total=len(all_trials),
             n_trials_complete=n_complete,
             n_trials_pruned=n_pruned,
-            elapsed_seconds=time.time() - t0,
+            elapsed_seconds=elapsed,
             objective_name=self.objective_name,
             param_importances=importances,
         )
+
         self.last_result = result
 
-        if self.verbose and best:
-            status = "INTERRUPTED" if interrupted else "Complete"
-            speedup = (self.n_trials * (result.elapsed_seconds / max(1, completed))) / max(0.1, result.elapsed_seconds)
-            print(f"\n  {'═' * 60}")
-            print(f"  Bayesian Parallel {status} ({result.elapsed_seconds:.1f}s, ~{speedup:.1f}x vs sequential)")
-            print(f"  Trials: {n_complete} complete, {self.n_jobs} workers")
-            print(f"  Best: obj={best.objective_value:.3f} "
-                  f"SR={best.sharpe_ratio:.2f} Ret={best.total_return:+.1f}% "
-                  f"WR={best.win_rate:.1f}% DD={best.max_drawdown:.1f}%")
-            if importances:
-                top_imp = sorted(importances.items(),
-                                key=lambda x: x[1], reverse=True)[:5]
-                print(f"  Importances: {', '.join(f'{k}={v:.2f}' for k,v in top_imp)}")
+        if self.verbose:
+            self._print_summary(result, interrupted)
 
         return result
 
-    def run_multi_objective(self,
-                            strategy,
-                            data: dict,
-                            engine_factory: Callable,
-                            symbol: str = "",
-                            timeframe: str = "",
-                            param_subset: Optional[List[str]] = None
-                            ) -> BayesianResult:
-        """
-        Multi-objective optimization: maximize Sharpe, minimize MaxDrawdown.
-        Returns Pareto-optimal set.
-        """
-        t0 = time.time()
-        param_defs = strategy.parameter_defs()
-        all_trials = []
+    def _print_summary(self, result: 'BayesianResult', interrupted: bool = False):
+        """Print optimization summary."""
+        print(f"\n  {'─' * 80}")
+        if interrupted:
+            print(f"  ⚠️  Partial results ({result.n_trials_total} trials)")
+        else:
+            print(f"  ✅ Complete ({result.n_trials_total} trials, "
+                  f"{result.n_trials_pruned} pruned)")
 
-        if self.verbose:
-            print(f"\n  Multi-Objective Bayesian: Sharpe↑ + MaxDD↓")
+        if result.best_trial:
+            bt = result.best_trial
+            print(f"\n  Best trial #{bt.trial_id}:")
+            print(f"    Objective:  {bt.objective_value:.4f}")
+            print(f"    Sharpe:     {bt.sharpe_ratio:.2f}")
+            print(f"    Return:     {bt.total_return:+.1f}%")
+            print(f"    Win Rate:   {bt.win_rate:.1f}%")
+            print(f"    Max DD:     {bt.max_drawdown:.1f}%")
+            print(f"    PF:         {bt.profit_factor:.2f}")
+            print(f"    Trades:     {bt.n_trades}")
 
-        sampler = TPESampler(seed=self.seed, n_startup_trials=15)
+            # Show effective param count for best trial
+            try:
+                from strategies.base import ParamDef
+                # We can't easily get param_defs here, so show modes
+                am = bt.params.get('alpha_method', '?')
+                st = bt.params.get('sltp_type', '?')
+                print(f"    Modes:      alpha={am}, sltp={st}")
+            except Exception:
+                pass
 
-        study = optuna.create_study(
-            directions=["maximize", "minimize"],
-            sampler=sampler,
-        )
-        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        if result.param_importances:
+            print(f"\n  Parameter importances:")
+            for name, imp in sorted(result.param_importances.items(),
+                                     key=lambda x: x[1], reverse=True)[:10]:
+                bar = '█' * int(imp * 40)
+                print(f"    {name:>25s}: {imp:.3f} {bar}")
 
-        def _mo_objective(trial):
-            optimized_params = self._build_search_space(trial, param_defs, param_subset)
-            strat = copy.deepcopy(strategy)
-            strat.set_params(optimized_params)
-
-            engine = engine_factory()
-            result = engine.run(strat, data, symbol, timeframe)
-
-            full_params = strat.default_params()
-            full_params.update(strat.params)
-
-            bt = BayesianTrial(
-                trial_id=trial.number,
-                params=full_params,
-                sharpe_ratio=result.sharpe_ratio,
-                total_return=result.total_return,
-                max_drawdown=result.max_drawdown,
-                win_rate=result.win_rate,
-                profit_factor=result.profit_factor,
-                n_trades=result.n_trades,
-                objective_value=result.sharpe_ratio,
-            )
-            all_trials.append(bt)
-
-            return result.sharpe_ratio, result.max_drawdown
-
-        study.optimize(_mo_objective, n_trials=self.n_trials,
-                       timeout=self.timeout, show_progress_bar=False)
-
-        # Pareto front
-        pareto = study.best_trials
-        all_trials.sort(key=lambda t: t.objective_value, reverse=True)
-
-        best = all_trials[0] if all_trials else None
-
-        result = BayesianResult(
-            trials=all_trials[:50],
-            best_trial=best,
-            best_params=best.params if best else {},
-            n_trials_total=len(study.trials),
-            n_trials_complete=len(all_trials),
-            elapsed_seconds=time.time() - t0,
-            objective_name='multi(sharpe,maxdd)',
-        )
-
-        if self.verbose:
-            print(f"  Pareto front: {len(pareto)} solutions")
-            for i, pt in enumerate(pareto[:5]):
-                print(f"    #{i}: SR={pt.values[0]:.2f} MaxDD={pt.values[1]:.1f}%")
-
-        return result
+        print(f"\n  Elapsed: {result.elapsed_seconds:.1f}s")
+        print(f"  {'─' * 80}\n")
