@@ -121,3 +121,18 @@ class IStrategy(ABC):
         Can return dict with updated SL/TP for trailing, BE, etc.
         """
         return None
+
+    def create_incremental_processor(self):
+        '''
+        Return an incremental processor for intrabar execution,
+        or None for standard bar-close execution.
+
+        The processor must implement:
+            .reset()
+            .update(high, low, close, volume, timestamp) -> Signal | None
+
+        Override in strategies that need tick-by-tick signal evaluation
+        (e.g. CyberCycle). Strategies like GaussBands and SmartMoney
+        that work on bar-close should NOT override this.
+        '''
+        return None

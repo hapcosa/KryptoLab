@@ -28,7 +28,7 @@ from indicators.ehlers import (
     kalman_alpha, cybercycle, itrend, fisher_transform,
 )
 from indicators.common import ema, sma, atr, crossover, crossunder, volume_ratio
-
+from indicators.incremental_ehlers import IncrementalCyberCycle
 
 # ═══════════════════════════════════════════════════════════════
 #  CONFIDENCE v7 — sin HTF, con cycle_strength
@@ -131,12 +131,12 @@ class CyberCycleStrategy(IStrategy):
 
             # ── Risk params: ATR mode (slatr_tprr) ──────────────────
             ParamDef('leverage', 'float', 7.0, 12.0, 35.0, 1.0),
-            ParamDef('sl_atr_mult', 'float', 2.5, 0.5, 4.0, 0.1),
+            ParamDef('sl_atr_mult', 'float', 2.5, 0.5, 3.0, 0.1),
 
             # TP1 / TP2 — R:R multipliers sobre la distancia al SL
-            ParamDef('tp1_rr', 'float', 2.0, 0.5, 5.0, 0.25),
+            ParamDef('tp1_rr', 'float', 2.0, 0.5, 2.5, 0.25),
             ParamDef('tp1_size', 'float', 0.6, 0.1, 0.9, 0.05),
-            ParamDef('tp2_rr', 'float', 4.0, 1.0, 10.0, 0.25),
+            ParamDef('tp2_rr', 'float', 4.0, 1.0, 6.0, 0.25),
 
             # ── Risk params: FIXED mode (sltp_fixed) ────────────────
             #  SL y TP expresados como % del precio de entrada.
@@ -468,3 +468,10 @@ class CyberCycleStrategy(IStrategy):
                 'trail_pct': self.get_param('trail_pullback_pct', 1.0) if use_trailing else 0,
             }
         )
+
+    def create_incremental_processor(self):
+        '''Create incremental processor for intrabar execution.'''
+        # Merge defaults with current params
+        full_params = self.default_params()
+        full_params.update(self.params)
+        return IncrementalCyberCycle(full_params)
