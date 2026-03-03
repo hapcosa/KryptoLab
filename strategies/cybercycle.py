@@ -144,10 +144,10 @@ class CyberCycleStrategy(IStrategy):
             #      tp1_fixed_pct=2.0 → TP1 a +2.0% del entry
             #      tp2_fixed_pct=4.0 → TP2 a +4.0% del entry
             # ─────────────────────────────────────────────────────────
-            ParamDef('sl_fixed_pct', 'float', 1.0, 0.3, 5.0, 0.1),
-            ParamDef('tp1_fixed_pct', 'float', 1.2, 0.5, 8.0, 0.25),
+            ParamDef('sl_fixed_pct', 'float', 2.5, 0.3, 5.0, 0.1),
+            ParamDef('tp1_fixed_pct', 'float', 3.0, 0.5, 8.0, 0.25),
             ParamDef('tp1_fixed_size', 'float', 0.7, 0.1, 0.9, 0.05),
-            ParamDef('tp2_fixed_pct', 'float', 1.6, 1.0, 15.0, 0.5),
+            ParamDef('tp2_fixed_pct', 'float', 4.5, 1.0, 15.0, 0.5),
 
             # ── Break-even ──────────────────────────────────────────
             ParamDef('be_pct', 'float', 0.8, 1.0, 3.0, 0.1),
