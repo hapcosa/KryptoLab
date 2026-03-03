@@ -28,7 +28,7 @@ import pandas as pd
 
 from core.engine import BacktestEngine, format_result
 from data.bitget_client import DataCache, generate_sample_data
-from core.engine_intrabar import IntrabarBacktestEngine as EngineClass
+
 
 def get_strategy(name: str):
     """Load strategy by name."""
@@ -628,19 +628,25 @@ def _make_engine_factory(capital: float = 10000.0,
     Returns:
         Callable that returns a configured BacktestEngine
     """
-    try:
-        from core.engine_intrabar import IntrabarBacktestEngine as EngineClass
-    except ImportError:
-        from core.engine import BacktestEngine as EngineClass
 
-    def factory():
-        engine = EngineClass(
-            initial_capital=capital,
-            market_config=market_config,
-        )
+    def factory():  # ← import AQUÍ DENTRO
+        try:
+            from core.engine_intrabar import IntrabarBacktestEngine
+            engine = IntrabarBacktestEngine(
+                initial_capital=capital,
+                market_config=market_config,
+            )
+        except ImportError:
+            from core.engine import BacktestEngine
+            engine = BacktestEngine(
+                initial_capital=capital,
+                market_config=market_config,
+            )
         if _dd is not None and _dtf is not None:
             engine.set_detail_data(_dd, _dtf)
         return engine
+
+    return factory
 
 
 # ═══════════════════════════════════════════════════════════════
