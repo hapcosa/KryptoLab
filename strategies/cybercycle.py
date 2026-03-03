@@ -90,22 +90,11 @@ class CyberCycleStrategy(IStrategy):
         return [
             # ── Alpha method ────────────────────────────────────────
             ParamDef('alpha_method', 'categorical', 'manual',
-                     options=['mama', 'kalman', 'manual']),
+                     options=['kalman', 'manual']),
             ParamDef('manual_alpha', 'float', 0.35, 0.05, 0.80, 0.01),
             ParamDef('alpha_floor', 'float', 0.0, 0.0, 0.50, 0.01),
 
-            # Homodyne params
-            ParamDef('hd_min_period', 'float', 3.0, 2.0, 10.0, 1.0),
-            ParamDef('hd_max_period', 'float', 40.0, 15.0, 80.0, 5.0),
 
-            # MAMA params
-            ParamDef('mama_fast', 'float', 0.5, 0.2, 0.8, 0.05),
-            ParamDef('mama_slow', 'float', 0.05, 0.01, 0.2, 0.01),
-
-            # Autocorrelation params
-            ParamDef('ac_min_period', 'int', 6, 3, 15),
-            ParamDef('ac_max_period', 'int', 48, 20, 80),
-            ParamDef('ac_avg_length', 'int', 3, 1, 5),
 
             # Kalman params
             ParamDef('kal_process_noise', 'float', 0.01, 0.001, 0.2, 0.005),
@@ -117,10 +106,10 @@ class CyberCycleStrategy(IStrategy):
             # ── Signal params ───────────────────────────────────────
             ParamDef('itrend_alpha', 'float', 0.07, 0.01, 0.30, 0.01),
             ParamDef('trigger_ema', 'int', 14, 3, 30, 3),
-            ParamDef('min_bars', 'int', 24, 16, 60, 2),
-            ParamDef('confidence_min', 'float', 75.0, 40.0, 95.0, 5.0),
-            ParamDef('ob_level', 'float', 1.5, 0.3, 3.0, 0.1),
-            ParamDef('os_level', 'float', -1.5, -3.0, -0.3, 0.1),
+            ParamDef('min_bars', 'int', 24, 24, 60, 2),
+            ParamDef('confidence_min', 'float', 75.0, 40.0, 90.0, 5.0),
+            ParamDef('ob_level', 'float', 1.5, 0.3, 4.0, 0.1),
+            ParamDef('os_level', 'float', -1.5, -4.0, -0.3, 0.1),
 
             # ── Cycle strength ──────────────────────────────────────
             ParamDef('cycle_str_pctile', 'float', 50.0, 20.0, 80.0, 5.0),
@@ -141,7 +130,7 @@ class CyberCycleStrategy(IStrategy):
                      options=['slatr_tprr', 'sltp_fixed']),
 
             # ── Risk params: ATR mode (slatr_tprr) ──────────────────
-            ParamDef('leverage', 'float', 7.0, 1.0, 60.0, 1.0),
+            ParamDef('leverage', 'float', 7.0, 12.0, 35.0, 1.0),
             ParamDef('sl_atr_mult', 'float', 2.5, 0.5, 4.0, 0.1),
 
             # TP1 / TP2 — R:R multipliers sobre la distancia al SL
@@ -161,12 +150,12 @@ class CyberCycleStrategy(IStrategy):
             ParamDef('tp2_fixed_pct', 'float', 1.6, 1.0, 15.0, 0.5),
 
             # ── Break-even ──────────────────────────────────────────
-            ParamDef('be_pct', 'float', 0.8, 0.5, 3.0, 0.1),
+            ParamDef('be_pct', 'float', 0.8, 1.0, 3.0, 0.1),
 
             # ── Trailing stop ───────────────────────────────────────
             ParamDef('use_trailing', 'bool', True),
             ParamDef('trail_activate_pct', 'float', 1.4, 1.0, 5.0, 0.25),
-            ParamDef('trail_pullback_pct', 'float', 0.4, 0.7, 2.5, 0.10),
+            ParamDef('trail_pullback_pct', 'float', 0.8, 0.7, 2.5, 0.10),
         ]
 
     # ─────────────────────────────────────────────────────────────
