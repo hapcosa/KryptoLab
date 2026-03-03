@@ -190,7 +190,7 @@ class DataManager:
     # Detail TF mapping for intra-bar simulation
     DETAIL_TF_MAP = {
         '15m': '1m',   # 15 detail bars per main bar
-        '4h': '5m',   # 48 detail bars per main bar
+        '4h': '1m',   # 48 detail bars per main bar
         '2h': '1m',   # 120 detail bars per main bar
         '1h': '1m',   # 60 detail bars per main bar
         '6h': '5m',   # 72 detail bars per main bar
