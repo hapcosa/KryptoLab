@@ -610,9 +610,10 @@ def _load_data(args, timeframe='4h'):
     return data, detail_info, symbol, tf
 
 
-def _make_engine_factory(capital: float = 10000.0,
-                         detail_info: dict = None,
-                         market_config: dict = None):
+def _make_engine_factory(capital, detail_info=None, market_config=None):
+    _detail = detail_info or {'data': None, 'tf': None}
+    _dd = _detail.get('data')
+    _dtf = _detail.get('tf')
     """
     Create an engine_factory that produces BacktestEngines
     with detail data and market config pre-loaded.
