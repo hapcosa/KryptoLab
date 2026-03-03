@@ -1194,7 +1194,64 @@ def cmd_download(args):
         print("  2. Verify the symbol exists on Bitget Futures")
         print("  3. Bitget API allows public candle access (no key needed)")
         print("  4. Rate limits: max 20 requests/sec")
+def cmd_download_batch(args):
+    """
+    Descarga múltiples símbolos y timeframes en paralelo.
 
+    Uso:
+        python cli.py download-batch --symbols BTCUSDT,ETHUSDT,SOLUSDT \\
+            --timeframes 4h,1h,15m,1m --start 2023-01-01 --end 2025-01-01 \\
+            --exchange binance --workers 4
+    """
+    from data.data_manager import DataManager
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    symbols = args.get('symbols', '').split(',')
+    timeframes = args.get('timeframes', '').split(',')
+    exchange = args.get('exchange', 'bitget')
+    start = args.get('start', '2023-01-01')
+    end = args.get('end', '2025-01-01')
+    workers = int(args.get('workers', 4))
+
+    if not symbols or not timeframes:
+        print("❌ Debes especificar --symbols y --timeframes")
+        return
+
+    print(f"\n📡 Descarga masiva ({exchange})")
+    print(f"   Símbolos: {len(symbols)} | Timeframes: {len(timeframes)}")
+    print(f"   Rango: {start} → {end}")
+    print(f"   Workers: {workers}\n")
+
+    tasks = []
+    total_combos = len(symbols) * len(timeframes)
+
+    # Usamos ThreadPoolExecutor para lanzar descargas en paralelo (cada una es síncrona por dentro)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_combo = {}
+        for sym in symbols:
+            for tf in timeframes:
+                dm = DataManager(exchange=exchange, verbose=False)
+                future = executor.submit(
+                    dm.get_data, sym, tf, start, end,
+                    warmup=True, validate=False, force_download=False
+                )
+                future_to_combo[future] = (sym, tf)
+
+        completed = 0
+        for future in as_completed(future_to_combo):
+            sym, tf = future_to_combo[future]
+            try:
+                df = future.result()
+                bars = len(df)
+                status = "✅" if bars > 0 else "⚠️ vacío"
+                print(f"  {status} {sym} {tf}: {bars:,} barras")
+            except Exception as e:
+                print(f"  ❌ {sym} {tf}: {e}")
+            completed += 1
+            print(f"  Progreso: {completed}/{total_combos}")
+
+    print("\n✅ Descarga masiva completada.")
 
 def cmd_data(args):
     """
@@ -1290,7 +1347,7 @@ def main():
 ║    data info               Show info for a dataset           ║
 ║    data validate           Validate data integrity           ║
 ║    data delete             Delete cached data                ║
-║                                                              ║
+║                                           ║
 ║  Core Commands:                                              ║
 ║    demo                    Run demo with all strategies       ║
 ║    backtest                Run single backtest                ║
@@ -1417,7 +1474,18 @@ def main():
         elif arg == '--trial':
             args['trial'] = int(sys.argv[i + 1])
             i += 2
-
+        elif arg == '--symbols':
+            args['symbols'] = sys.argv[i + 1]
+            i += 2
+        elif arg == '--timeframes':
+            args['timeframes'] = sys.argv[i + 1]
+            i += 2
+        elif arg == '--exchange':
+            args['exchange'] = sys.argv[i + 1]
+            i += 2
+        elif arg == '--workers':
+            args['workers'] = int(sys.argv[i + 1])
+            i += 2
         elif not arg.startswith('--'):
             # Sub-command for 'data' command
             args['data_cmd'] = arg
@@ -1427,6 +1495,7 @@ def main():
             i += 1
 
     commands = {
+        'download-batch': lambda: cmd_download_batch(args),
         'demo': lambda: cmd_demo(),
         'backtest': lambda: cmd_backtest(args),
         'params': lambda: cmd_list_params(args),

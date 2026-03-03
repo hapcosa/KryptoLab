@@ -182,11 +182,11 @@ class ValidationResult:
 class DataManager:
     """
     Central data management for CryptoLab.
-    
+
     Handles downloading, caching, validation, and serving of OHLCV data
     with intelligent gap-filling and user-specified date ranges.
     """
-    
+
     # Detail TF mapping for intra-bar simulation
     DETAIL_TF_MAP = {
         '15m': '1m',   # 15 detail bars per main bar
@@ -199,16 +199,33 @@ class DataManager:
         '1w': '1h',   # 168 detail bars per main bar
     }
 
-    def __init__(self, cache_dir: str = "./data/cache",
-                 api_key: str = "", api_secret: str = "",
-                 passphrase: str = "", verbose: bool = True):
-        self.cache = DataCache(cache_dir)
+    def __init__(self, cache_dir: str = "./data/cache", exchange: str = "bitget",
+                 api_key: str = "", api_secret: str = "", passphrase: str = "",
+                 verbose: bool = True):
+        self.exchange = exchange.lower()
+        # La caché se organiza en subcarpetas por exchange
+        self.cache_dir = Path(cache_dir) / self.exchange
+        self.cache = DataCache(str(self.cache_dir))  # DataCache adaptado para usar esta ruta
         self.api_key = api_key
         self.api_secret = api_secret
         self.passphrase = passphrase
         self.verbose = verbose
-        self._warmup_bars = 300  # Extra bars before start for indicator warmup
+        self._warmup_bars = 300
 
+    def _get_client(self):
+        """Retorna un cliente asíncrono para el exchange actual."""
+        if self.exchange == 'bitget':
+            from data.bitget_client import BitgetClient
+            return BitgetClient(self.api_key, self.api_secret, self.passphrase, self.verbose)
+        elif self.exchange == 'bingx':
+            from data.bingx_client import BingXClient
+            return BingXClient(self.api_key, self.api_secret, self.verbose)
+        elif self.exchange == 'binance':
+            from data.binance_client import BinanceClient
+            # Por ahora solo futures, podríamos añadir opción spot más adelante
+            return BinanceClient(use_spot=False, verbose=self.verbose)
+        else:
+            raise ValueError(f"Exchange desconocido: {self.exchange}")
     # ─────────────────────────────────────────────────
     #  PUBLIC API: Get Data (download if needed)
     # ─────────────────────────────────────────────────
@@ -347,7 +364,7 @@ class DataManager:
     def _download_range(self, symbol: str, timeframe: str,
                         date_range: DateRange):
         """Download a specific date range and save to cache."""
-        client = BitgetClient(self.api_key, self.api_secret, self.passphrase)
+        client = self._get_client()  # ← usa el cliente del exchange actual
 
         progress = DownloadProgress(
             symbol=symbol,
@@ -385,36 +402,64 @@ class DataManager:
     #  DOWNLOAD: Batch multi-symbol
     # ─────────────────────────────────────────────────
 
-    def download_batch(self, symbols: List[str], timeframe: str,
-                       start: str, end: str):
+    def cmd_download_batch(args):
         """
-        Download data for multiple symbols.
-
-        Usage:
-            dm.download_batch(['BTCUSDT', 'ETHUSDT', 'SOLUSDT'], '4h',
-                              '2023-01-01', '2025-01-01')
+        Descarga múltiples símbolos y timeframes en paralelo.
         """
-        date_range = DateRange(start, end)
+        from data.data_manager import DataManager
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        if self.verbose:
-            print(f"\n📡 Batch Download: {len(symbols)} symbols")
-            print(f"   Timeframe: {timeframe}")
-            print(f"   Range: {start} → {end} ({date_range.duration_days:.0f} days)")
-            print()
+        symbols_str = args.get('symbols', '')
+        timeframes_str = args.get('timeframes', '')
 
-        for i, symbol in enumerate(symbols, 1):
-            if self.verbose:
-                print(f"  [{i}/{len(symbols)}] {symbol}")
+        if not symbols_str or not timeframes_str:
+            print("❌ Debes especificar --symbols y --timeframes")
+            return
 
-            try:
-                self.get_data(symbol, timeframe, start, end,
-                              warmup=True, validate=False)
-            except Exception as e:
-                print(f"   ❌ Error: {e}")
+        symbols = [s.strip() for s in symbols_str.split(',') if s.strip()]
+        timeframes = [tf.strip() for tf in timeframes_str.split(',') if tf.strip()]
 
-            if self.verbose:
-                print()
+        exchange = args.get('exchange', 'bitget')
+        start = args.get('start', '2023-01-01')
+        end = args.get('end', '2025-01-01')
+        workers = int(args.get('workers', 4))
 
+        if not symbols or not timeframes:
+            print("❌ Las listas de símbolos y timeframes no pueden estar vacías")
+            return
+
+        print(f"\n📡 Descarga masiva ({exchange})")
+        print(f"   Símbolos: {len(symbols)} | Timeframes: {len(timeframes)}")
+        print(f"   Rango: {start} → {end}")
+        print(f"   Workers: {workers}\n")
+
+        total_combos = len(symbols) * len(timeframes)
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_combo = {}
+            for sym in symbols:
+                for tf in timeframes:
+                    dm = DataManager(exchange=exchange, verbose=False)
+                    future = executor.submit(
+                        dm.get_data, sym, tf, start, end,
+                        warmup=True, validate=False, force_download=False
+                    )
+                    future_to_combo[future] = (sym, tf)
+
+            for future in as_completed(future_to_combo):
+                sym, tf = future_to_combo[future]
+                try:
+                    df = future.result()
+                    bars = len(df)
+                    status = "✅" if bars > 0 else "⚠️ vacío"
+                    print(f"  {status} {sym} {tf}: {bars:,} barras")
+                except Exception as e:
+                    print(f"  ❌ {sym} {tf}: {e}")
+                completed += 1
+                print(f"  Progreso: {completed}/{total_combos}")
+
+        print("\n✅ Descarga masiva completada.")
     # ─────────────────────────────────────────────────
     #  CACHE: Inspection and management
     # ─────────────────────────────────────────────────
