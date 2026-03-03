@@ -299,7 +299,7 @@ def cmd_backtest(args):
     # Monthly breakdown
     try:
         from optimize.grid_search import compute_monthly_stats
-        ms = compute_monthly_stats(result.trades)
+        ms = compute_monthly_stats(result.trades, initial_capital=capital)
         if ms['n_months'] >= 2:
             print(f"\n  📅 MONTHLY BREAKDOWN")
             print(f"  {'─' * 60}")
@@ -868,7 +868,7 @@ def cmd_optimize(args):
                     trial_strat.set_params(params)
                     trial_engine = engine_factory()
                     trial_result = trial_engine.run(trial_strat, data, symbol, tf)
-                    ms = compute_monthly_stats(trial_result.trades)
+                    ms = compute_monthly_stats(trial_result.trades, initial_capital=capital)
 
                     if ms['n_months'] >= 2:
                         # Compact monthly line

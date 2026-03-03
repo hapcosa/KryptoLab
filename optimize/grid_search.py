@@ -67,82 +67,110 @@ def objective_composite(result) -> float:
     return sr * 0.4 + pf * 0.2 + cal * 0.2 + wr * 0.2
 
 
-def compute_monthly_stats(trades) -> dict:
-    """
-    Compute monthly breakdown from trade list.
-    Returns dict with monthly_returns, pct_positive, worst_month,
-    monthly_sharpe, and a list of (year, month, pnl_pct, n_trades, wr).
-    """
-    from collections import defaultdict
-    from datetime import datetime
+ef
+compute_monthly_stats(trades, initial_capital: float = 1000.0) -> dict:
+"""
+Compute monthly breakdown from trade list.
 
-    if not trades or len(trades) < 2:
-        return {
-            'months': [],
-            'monthly_returns': [],
-            'pct_positive': 0.0,
-            'worst_month': 0.0,
-            'best_month': 0.0,
-            'monthly_sharpe': 0.0,
-            'avg_monthly_return': 0.0,
-            'n_months': 0,
-        }
+FIX: pnl_pct is now calculated relative to the running capital
+at the start of each month, not relative to avg position size.
+This matches the engine's total_return calculation which uses
+the equity curve.
 
-    # Group trades by (year, month) using exit_time
-    monthly = defaultdict(list)
-    for t in trades:
-        ts = getattr(t, 'exit_time', 0)
-        if ts > 1e9:  # unix timestamp
-            dt = datetime.utcfromtimestamp(ts / 1000 if ts > 1e12 else ts)
-        else:
-            dt = datetime(2024, 1, 1)  # fallback for bar indices
-        key = (dt.year, dt.month)
-        monthly[key].append(t)
+Returns dict with monthly_returns, pct_positive, worst_month,
+monthly_sharpe, and a list of (year, month, pnl_pct, n_trades, wr).
+"""
+from collections import defaultdict
+from datetime import datetime
 
-    # Compute per-month stats
-    months_data = []
-    monthly_rets = []
-    for (y, m), month_trades in sorted(monthly.items()):
-        total_pnl = sum(t.net_pnl for t in month_trades)
-        n = len(month_trades)
-        wins = sum(1 for t in month_trades if t.net_pnl > 0)
-        wr = (wins / n * 100) if n > 0 else 0
-
-        # PnL as % of capital at start of month (approximate)
-        # Use sum of net_pnl relative to avg position size
-        avg_size = np.mean([abs(t.size) for t in month_trades]) if month_trades else 1
-        pnl_pct = (total_pnl / avg_size * 100) if avg_size > 0 else 0
-
-        months_data.append({
-            'year': y, 'month': m,
-            'pnl': total_pnl,
-            'pnl_pct': pnl_pct,
-            'n_trades': n,
-            'win_rate': wr,
-        })
-        monthly_rets.append(pnl_pct)
-
-    monthly_rets = np.array(monthly_rets)
-    n_months = len(monthly_rets)
-    pos_months = np.sum(monthly_rets > 0)
-    pct_positive = (pos_months / n_months * 100) if n_months > 0 else 0
-
-    avg_ret = np.mean(monthly_rets) if n_months > 0 else 0
-    std_ret = np.std(monthly_rets) if n_months > 1 else 1
-    monthly_sharpe = (avg_ret / std_ret) if std_ret > 0 else 0
-
+if not trades or len(trades) < 2:
     return {
-        'months': months_data,
-        'monthly_returns': monthly_rets.tolist(),
-        'pct_positive': pct_positive,
-        'worst_month': float(np.min(monthly_rets)) if n_months > 0 else 0,
-        'best_month': float(np.max(monthly_rets)) if n_months > 0 else 0,
-        'monthly_sharpe': monthly_sharpe,
-        'avg_monthly_return': avg_ret,
-        'n_months': n_months,
+        'months': [],
+        'monthly_returns': [],
+        'pct_positive': 0.0,
+        'worst_month': 0.0,
+        'best_month': 0.0,
+        'monthly_sharpe': 0.0,
+        'avg_monthly_return': 0.0,
+        'n_months': 0,
     }
 
+# Group trades by (year, month) using exit_time
+monthly = defaultdict(list)
+for t in trades:
+    ts = getattr(t, 'exit_time', 0)
+    if ts > 1e9:  # unix timestamp
+        dt = datetime.utcfromtimestamp(ts / 1000 if ts > 1e12 else ts)
+    else:
+        dt = datetime(2024, 1, 1)  # fallback for bar indices
+    key = (dt.year, dt.month)
+    monthly[key].append(t)
 
+# Sort trades by exit_time to reconstruct capital progression
+all_trades_sorted = sorted(trades, key=lambda t: getattr(t, 'exit_time', 0))
+
+# Build a map: for each month, what was the capital at its start?
+# We walk through all trades in order, accumulating net_pnl
+running_capital = initial_capital
+month_start_capital = {}
+current_month_key = None
+
+for t in all_trades_sorted:
+    ts = getattr(t, 'exit_time', 0)
+    if ts > 1e9:
+        dt = datetime.utcfromtimestamp(ts / 1000 if ts > 1e12 else ts)
+    else:
+        dt = datetime(2024, 1, 1)
+    key = (dt.year, dt.month)
+
+    # First time we see this month → record starting capital
+    if key not in month_start_capital:
+        month_start_capital[key] = running_capital
+
+    # Accumulate PnL (net_pnl includes commissions and funding)
+    running_capital += getattr(t, 'net_pnl', 0.0)
+
+# Compute per-month stats
+months_data = []
+monthly_rets = []
+for (y, m), month_trades in sorted(monthly.items()):
+    total_pnl = sum(t.net_pnl for t in month_trades)
+    n = len(month_trades)
+    wins = sum(1 for t in month_trades if t.net_pnl > 0)
+    wr = (wins / n * 100) if n > 0 else 0
+
+    # PnL as % of capital at START of this month
+    start_cap = month_start_capital.get((y, m), initial_capital)
+    pnl_pct = (total_pnl / start_cap * 100) if start_cap > 0 else 0
+
+    months_data.append({
+        'year': y, 'month': m,
+        'pnl': total_pnl,
+        'pnl_pct': pnl_pct,
+        'n_trades': n,
+        'win_rate': wr,
+    })
+    monthly_rets.append(pnl_pct)
+
+monthly_rets = np.array(monthly_rets)
+n_months = len(monthly_rets)
+pos_months = np.sum(monthly_rets > 0)
+pct_positive = (pos_months / n_months * 100) if n_months > 0 else 0
+
+avg_ret = np.mean(monthly_rets) if n_months > 0 else 0
+std_ret = np.std(monthly_rets) if n_months > 1 else 1
+monthly_sharpe = (avg_ret / std_ret) if std_ret > 0 else 0
+
+return {
+    'months': months_data,
+    'monthly_returns': monthly_rets.tolist(),
+    'pct_positive': pct_positive,
+    'worst_month': float(np.min(monthly_rets)) if n_months > 0 else 0,
+    'best_month': float(np.max(monthly_rets)) if n_months > 0 else 0,
+    'monthly_sharpe': monthly_sharpe,
+    'avg_monthly_return': avg_ret,
+    'n_months': n_months,
+}
 def compute_weekly_stats(trades) -> dict:
     """
     Compute per-week PnL and consistency metrics.
