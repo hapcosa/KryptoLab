@@ -459,8 +459,8 @@ class IncrementalCyberCycle:
 
     def __init__(self, params: Dict[str, Any], detail_tf_ratio: int = 1):
         self.p = dict(params)  # shallow copy
-        # Ratio of detail bars per main-TF bar (e.g. 60 for 1m detail / 1h main).
-        # Used to scale min_bars throttle so it operates in main-TF bar units.
+        # Ratio of detail bars per main-TF bar (e.g. 60 for 1m/1h).
+        # Scales min_bars throttle so it operates in main-TF bar units.
         self._detail_tf_ratio = max(1, int(detail_tf_ratio))
         self._build_alpha_computer()
         self.reset()
@@ -541,6 +541,11 @@ class IncrementalCyberCycle:
         self._prev_cycle = 0.0
         self._prev_trigger = 0.0
 
+        # ── Cycle strength (rolling percentile of abs(cycle)) ──
+        self._cycle_str_lookback = max(20, int(self.p.get('cycle_str_lookback', 50)))
+        self._abs_cycle_buf = _RingBuf(self._cycle_str_lookback)
+        self._cycle_str_initialized = False  # True after lookback bars filled
+
         # ── Signal control ──
         self._bar_count = 0
         self._last_signal_bar = -9999
@@ -602,17 +607,12 @@ class IncrementalCyberCycle:
             cycle = a1 * (sm0 - 2.0 * sm1 + sm2) + a2 * c1 - a3 * c2
 
         # ─── 3. Trigger (EMA of cycle) ───
-        # IMPORTANT: save prev values BEFORE updating state.
-        # prev_cycle must be captured before push(); prev_trigger before EMA update.
-        # Asymmetry here was causing crossover detection to always use current
-        # cycle as "previous", making bull/bear_cross always False → WR=0%.
-        self._prev_cycle = self._cycle_buf.ago(0)   # current cycle, pre-push = previous
-        self._prev_trigger = self._trigger           # trigger before this bar's EMA update
+        # Save prev BEFORE push/update — fixes crossover detection
+        self._prev_cycle = self._cycle_buf.ago(0)   # current cycle pre-push = previous bar
+        self._prev_trigger = self._trigger           # trigger before EMA update
         self._cycle_buf.push(cycle)
         k = self._trigger_k
-        # Seed trigger with first cycle value — matches ema(cycle, period) in common.py
-        # which initializes out[0] = src[0]. Without this, trigger starts at 0
-        # and takes many bars to converge, causing false crossovers during warmup.
+        # Seed trigger with first cycle value (matches ema() in common.py: out[0]=src[0])
         if not self._trigger_initialized:
             self._trigger = cycle
             self._trigger_initialized = True
@@ -722,9 +722,7 @@ class IncrementalCyberCycle:
         if not (bull_cross or bear_cross):
             return None
 
-        # min_bars throttle — must be expressed in MAIN-TF bars, not detail bars.
-        # Multiply by detail_tf_ratio so e.g. min_bars=24 (1h bars) becomes
-        # 24*60=1440 when running on 1m detail bars.
+        # min_bars throttle scaled to main-TF bar units
         min_bars = self.p.get('min_bars', 24) * self._detail_tf_ratio
         if i - self._last_signal_bar < min_bars:
             return None
@@ -732,24 +730,40 @@ class IncrementalCyberCycle:
         is_buy = bull_cross
         use_trend = self.p.get('use_trend', True)
 
-        # ── Confidence scoring (exact match of compute_confidence) ──
+        # ── Cycle strength (rolling percentile of |cycle|) — mirrors cycle_strong ──
+        abs_c = abs(cycle)
+        self._abs_cycle_buf.push(abs_c)
+        if self._abs_cycle_buf.count >= self._cycle_str_lookback:
+            self._cycle_str_initialized = True
+        lookback_vals = [self._abs_cycle_buf.ago(k)
+                         for k in range(self._abs_cycle_buf.count)]
+        if self._cycle_str_initialized and lookback_vals:
+            pctile_thresh = self.p.get('cycle_str_pctile', 50.0)
+            import statistics
+            threshold = sorted(lookback_vals)[int(len(lookback_vals) * pctile_thresh / 100.0)]
+            cycle_strong = abs_c >= threshold
+        else:
+            cycle_strong = True  # default True during warmup (mirrors vectorized)
+
+        # ── Confidence scoring v7 (matches compute_confidence_v7 exactly) ──
+        # Weights: cross=20, iTrend=20, OB/OS=15, Volume=15, Fisher=10, Momentum=10, CycleStr=10
         conf = 0.0
         if is_buy:
             conf += 20.0 if bull_cross else 0.0
-            conf += 15.0 if (bull_trend if use_trend else True) else 0.0
+            conf += 20.0 if (bull_trend if use_trend else True) else 0.0
             conf += 15.0 if in_os else 0.0
             conf += 15.0 if (volume_ok if use_vol else True) else 0.0
             conf += 10.0 if fish_rising else 0.0
             conf += 10.0 if (momentum3 > 0) else 0.0
-            conf += 15.0 if htf_align_buy else 0.0
+            conf += 10.0 if cycle_strong else 0.0
         else:
             conf += 20.0 if bear_cross else 0.0
-            conf += 15.0 if (bear_trend if use_trend else True) else 0.0
+            conf += 20.0 if (bear_trend if use_trend else True) else 0.0
             conf += 15.0 if in_ob else 0.0
             conf += 15.0 if (volume_ok if use_vol else True) else 0.0
             conf += 10.0 if fish_falling else 0.0
             conf += 10.0 if (momentum3 < 0) else 0.0
-            conf += 15.0 if htf_align_sell else 0.0
+            conf += 10.0 if cycle_strong else 0.0
         conf = min(conf, 100.0)
 
         # Confidence filter
@@ -770,30 +784,51 @@ class IncrementalCyberCycle:
 
         self._last_signal_bar = i
 
-        # ── Build Signal (mirrors cybercycle.py exactly) ──
+        # ── Build Signal (mirrors cybercycle.py generate_signal exactly) ──
         direction = 1 if is_buy else -1
         entry = close
 
-        sl_dist = atr_val * self.p.get('sl_atr_mult', 1.5)
-        sl = entry - direction * sl_dist
-        risk = sl_dist
+        # ── SL/TP dual mode — matches _compute_sltp_fixed / _compute_sltp_atr_rr ──
+        sltp_type = self.p.get('sltp_type', 'slatr_tprr')
+        if sltp_type == 'sltp_fixed':
+            sl_pct = self.p.get('sl_fixed_pct', 1.5) / 100.0
+            tp1_pct = self.p.get('tp1_fixed_pct', 2.0) / 100.0
+            tp2_pct = self.p.get('tp2_fixed_pct', 4.0) / 100.0
+            tp1_size = self.p.get('tp1_fixed_size', 0.6)
+            tp2_size = round(1.0 - tp1_size, 8)
+            sl = entry * (1.0 - direction * sl_pct)
+            tp1 = entry * (1.0 + direction * tp1_pct)
+            tp2 = entry * (1.0 + direction * tp2_pct)
+            sl_dist = abs(entry - sl)
+        else:  # slatr_tprr
+            sl_dist = atr_val * self.p.get('sl_atr_mult', 1.5)
+            sl = entry - direction * sl_dist
+            tp1_rr = self.p.get('tp1_rr', 2.0)
+            tp2_rr = self.p.get('tp2_rr', 3.0)
+            tp1_size = self.p.get('tp1_size', 0.6)
+            tp2_size = round(1.0 - tp1_size, 8)
+            tp1 = entry + direction * sl_dist * tp1_rr
+            tp2 = entry + direction * sl_dist * tp2_rr
 
-        tp1_rr = self.p.get('tp1_rr', 2.0)
-        tp2_rr = self.p.get('tp2_rr', 3.0)
-        tp1_size = self.p.get('tp1_size', 0.6)
-        tp2_size = round(1.0 - tp1_size, 8)
-
-        tp1 = entry + direction * risk * tp1_rr
-        tp2 = entry + direction * risk * tp2_rr
-
-        # Break-even
+        # ── Break-even + Trailing (exact match of generate_signal logic) ──
         be_pct = self.p.get('be_pct', 1.5)
         be_trigger = entry * (1.0 + direction * be_pct / 100.0) if be_pct > 0 else 0.0
 
-        # Trailing
         use_trailing = self.p.get('use_trailing', True)
         trail_pullback = self.p.get('trail_pullback_pct', 1.0)
-        trailing_dist = entry * trail_pullback / 100.0 if use_trailing else 0.0
+        if use_trailing:
+            trail_activate_pct = self.p.get('trail_activate_pct', 2.0)
+            trailing_dist = entry * (trail_pullback / 100.0)
+            trail_activation_price = entry + direction * entry * (trail_activate_pct / 100.0)
+            # Mirrors: be_trigger = the closer of be_trigger vs trail_activation_price
+            if be_pct > 0.0:
+                dist_be = abs(be_trigger - entry)
+                dist_trail = abs(trail_activation_price - entry)
+                be_trigger = be_trigger if dist_be <= dist_trail else trail_activation_price
+            else:
+                be_trigger = trail_activation_price
+        else:
+            trailing_dist = 0.0
 
         return Signal(
             direction=direction,
