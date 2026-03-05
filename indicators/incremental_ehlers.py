@@ -490,7 +490,11 @@ class IncrementalCyberCycle:
         if i < 10: return None
         if not (bull_x or bear_x): return None
 
-        min_bars = self.p.get('min_bars', 24) * self._tf_ratio
+        # min_bars is in main-TF units (e.g. 1h bars).
+        # _bar and _lsb are both 1h bar counters (only advance on is_bar_close).
+        # Do NOT multiply by _tf_ratio — that would require 1440 hours between
+        # signals instead of 24, causing almost zero trades.
+        min_bars = self.p.get('min_bars', 24)
         if i - self._lsb < min_bars: return None
 
         is_buy    = bull_x
