@@ -106,7 +106,7 @@ class CyberCycleStrategy(IStrategy):
             # ── Signal params ───────────────────────────────────────
             ParamDef('itrend_alpha', 'float', 0.07, 0.01, 0.30, 0.01),
             ParamDef('trigger_ema', 'int', 14, 3, 30, 3),
-            ParamDef('min_bars', 'int', 24, 24, 60, 2),
+            ParamDef('min_bars', 'int', 24, 16, 60, 2),
             ParamDef('confidence_min', 'float', 75.0, 40.0, 90.0, 5.0),
             ParamDef('ob_level', 'float', 1.5, 0.3, 4.0, 0.1),
             ParamDef('os_level', 'float', -1.5, -4.0, -0.3, 0.1),
@@ -469,9 +469,15 @@ class CyberCycleStrategy(IStrategy):
             }
         )
 
-    def create_incremental_processor(self):
-        '''Create incremental processor for intrabar execution.'''
+    def create_incremental_processor(self, detail_tf_ratio: int = 1):
+        '''Create incremental processor for intrabar execution.
+
+        Args:
+            detail_tf_ratio: Number of detail bars per main-TF bar.
+                e.g. 60 for 1m detail on a 1h strategy.
+                Used to scale min_bars throttle to main-TF bar units.
+        '''
         # Merge defaults with current params
         full_params = self.default_params()
         full_params.update(self.params)
-        return IncrementalCyberCycle(full_params)
+        return IncrementalCyberCycle(full_params, detail_tf_ratio=detail_tf_ratio)

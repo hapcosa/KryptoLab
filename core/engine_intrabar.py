@@ -55,11 +55,22 @@ class IntrabarBacktestEngine(BacktestEngine):
         """
         processor = None
         if hasattr(strategy, 'create_incremental_processor'):
-            processor = strategy.create_incremental_processor()
+            # Compute how many detail bars correspond to one main-TF bar.
+            # e.g. main=1h (3600s), detail=1m (60s) → ratio=60
+            from data.bitget_client import TIMEFRAME_SECONDS
+            main_tf_sec = TIMEFRAME_SECONDS.get(timeframe, 3600)
+            detail_tf_sec = TIMEFRAME_SECONDS.get(
+                getattr(self, '_detail_tf', '1m'), 60
+            )
+            detail_tf_ratio = max(1, main_tf_sec // detail_tf_sec)
+            processor = strategy.create_incremental_processor(
+                detail_tf_ratio=detail_tf_ratio
+            )
 
         if processor is not None and self._detail_data is not None:
             return self._run_intrabar(
-                processor, strategy, data, symbol, timeframe, callback
+                processor, strategy, data, symbol, timeframe, callback,
+                _orig_timeframe=timeframe
             )
 
         # Standard bar-close path — unchanged
@@ -71,7 +82,7 @@ class IntrabarBacktestEngine(BacktestEngine):
 
     def _run_intrabar(self, processor, strategy: IStrategy,
                       main_data: dict, symbol: str, timeframe: str,
-                      callback=None) -> BacktestResult:
+                      callback=None, _orig_timeframe: str = None) -> BacktestResult:
         """
         Run backtest with signals evaluated on detail bars.
 
@@ -207,9 +218,12 @@ class IntrabarBacktestEngine(BacktestEngine):
                     last_bar['timestamp'], 'end_of_data'
                 )
 
-        # ── Compile results (using detail_tf for proper annualization) ──
+        # ── Compile results using MAIN timeframe data for correct annualization ──
+        # Trades were executed on detail bars (intrabar realism preserved),
+        # but Sharpe annualization and date reporting must use the original
+        # strategy timeframe (e.g. 1h), not the detail timeframe (e.g. 1m).
         return self._compile_results(
-            strategy, detail, symbol, detail_tf
+            strategy, main_data, symbol, timeframe
         )
 
     def _empty_result(self, strategy, symbol, timeframe) -> BacktestResult:

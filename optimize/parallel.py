@@ -89,11 +89,13 @@ def evaluate_trial(args) -> dict:
     Evaluate a single parameter set. Called in worker process.
     Receives only (trial_id, params_dict) — everything else is shared.
 
+    Uses IntrabarBacktestEngine when detail data is available so that
+    signal generation during optimization is IDENTICAL to backtest
+    (intrabar processor, same min_bars scaling, same SL/TP resolution).
+
     Returns dict with all trial metrics.
     """
     trial_id, params_to_set = args
-
-    from core.engine import BacktestEngine
 
     t0 = time.time()
 
@@ -101,18 +103,32 @@ def evaluate_trial(args) -> dict:
     strategy = copy.deepcopy(_shared['strategy'])
     strategy.set_params(params_to_set)
 
-    # Create fresh engine
     cfg = _shared['engine_config']
-    engine = BacktestEngine(
-        initial_capital=cfg.get('capital', 10000.0),
-        market_config=cfg.get('market_config'),
-    )
-
-    # Attach detail data if available
     dd = cfg.get('detail_data')
     dtf = cfg.get('detail_tf')
+
+    # Use IntrabarBacktestEngine when detail data is available — ensures
+    # optimization and backtest use the exact same execution path.
+    engine = None
     if dd is not None and dtf is not None:
-        engine.set_detail_data(dd, dtf)
+        try:
+            from core.engine_intrabar import IntrabarBacktestEngine
+            engine = IntrabarBacktestEngine(
+                initial_capital=cfg.get('capital', 10000.0),
+                market_config=cfg.get('market_config'),
+            )
+            engine.set_detail_data(dd, dtf)
+        except ImportError:
+            engine = None
+
+    if engine is None:
+        from core.engine import BacktestEngine
+        engine = BacktestEngine(
+            initial_capital=cfg.get('capital', 10000.0),
+            market_config=cfg.get('market_config'),
+        )
+        if dd is not None and dtf is not None:
+            engine.set_detail_data(dd, dtf)
 
     # Run backtest
     result = engine.run(strategy, _shared['data'],

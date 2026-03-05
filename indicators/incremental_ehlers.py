@@ -457,8 +457,11 @@ class IncrementalCyberCycle:
     and O(max_period²) for autocorrelation alpha.
     """
 
-    def __init__(self, params: Dict[str, Any]):
+    def __init__(self, params: Dict[str, Any], detail_tf_ratio: int = 1):
         self.p = dict(params)  # shallow copy
+        # Ratio of detail bars per main-TF bar (e.g. 60 for 1m detail / 1h main).
+        # Used to scale min_bars throttle so it operates in main-TF bar units.
+        self._detail_tf_ratio = max(1, int(detail_tf_ratio))
         self._build_alpha_computer()
         self.reset()
 
@@ -543,6 +546,7 @@ class IncrementalCyberCycle:
         self._last_signal_bar = -9999
         self._daily_count = 0
         self._current_day = -1
+        self._trigger_initialized = False  # seed trigger with first cycle value
 
     # ── Core update ──────────────────────────────────────────
 
@@ -597,13 +601,23 @@ class IncrementalCyberCycle:
             c2 = self._cycle_buf.ago(1)
             cycle = a1 * (sm0 - 2.0 * sm1 + sm2) + a2 * c1 - a3 * c2
 
-        self._cycle_buf.push(cycle)
-
         # ─── 3. Trigger (EMA of cycle) ───
-        self._prev_trigger = self._trigger
-        self._prev_cycle = self._cycle_buf.ago(1)  # cycle before this bar
+        # IMPORTANT: save prev values BEFORE updating state.
+        # prev_cycle must be captured before push(); prev_trigger before EMA update.
+        # Asymmetry here was causing crossover detection to always use current
+        # cycle as "previous", making bull/bear_cross always False → WR=0%.
+        self._prev_cycle = self._cycle_buf.ago(0)   # current cycle, pre-push = previous
+        self._prev_trigger = self._trigger           # trigger before this bar's EMA update
+        self._cycle_buf.push(cycle)
         k = self._trigger_k
-        self._trigger = k * cycle + (1.0 - k) * self._trigger
+        # Seed trigger with first cycle value — matches ema(cycle, period) in common.py
+        # which initializes out[0] = src[0]. Without this, trigger starts at 0
+        # and takes many bars to converge, causing false crossovers during warmup.
+        if not self._trigger_initialized:
+            self._trigger = cycle
+            self._trigger_initialized = True
+        else:
+            self._trigger = k * cycle + (1.0 - k) * self._trigger
 
         # ─── 4. iTrend ───
         self._close_buf.push(close)
@@ -708,8 +722,10 @@ class IncrementalCyberCycle:
         if not (bull_cross or bear_cross):
             return None
 
-        # min_bars throttle
-        min_bars = self.p.get('min_bars', 24)
+        # min_bars throttle — must be expressed in MAIN-TF bars, not detail bars.
+        # Multiply by detail_tf_ratio so e.g. min_bars=24 (1h bars) becomes
+        # 24*60=1440 when running on 1m detail bars.
+        min_bars = self.p.get('min_bars', 24) * self._detail_tf_ratio
         if i - self._last_signal_bar < min_bars:
             return None
 
