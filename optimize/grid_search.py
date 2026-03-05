@@ -49,6 +49,42 @@ class GridSearchResult:
 
 # ─── Objective functions ───
 
+
+
+def _total_calendar_weeks(trades, active_weeks_fallback: int) -> float:
+    """
+    Calendar weeks between first and last trade — NOT just active weeks.
+    Bug was: divide by ws['n_weeks'] (= weeks WITH trades).
+    Result: 26 trades in 156 calendar weeks → 26/26 = 1.0/wk (passes gate).
+    Fix:    26 trades in 156 calendar weeks → 26/156 = 0.17/wk (fails gate).
+    """
+    if not trades:
+        return float(max(1, active_weeks_fallback))
+    def _ts(t):
+        return getattr(t, 'exit_time', 0) or getattr(t, 'entry_time', 0)
+    all_ts = [_ts(t) for t in trades if _ts(t) > 0]
+    if len(all_ts) < 2:
+        return float(max(1, active_weeks_fallback))
+    span_days = (max(all_ts) - min(all_ts)) / (1000.0 * 86400.0)
+    return max(float(active_weeks_fallback), span_days / 7.0)
+
+
+def _total_calendar_months(trades, active_months_fallback: int) -> float:
+    """Calendar months between first and last trade."""
+    if not trades:
+        return float(max(1, active_months_fallback))
+    from datetime import datetime
+    def _ts(t):
+        return getattr(t, 'exit_time', 0) or getattr(t, 'entry_time', 0)
+    all_ts = [_ts(t) for t in trades if _ts(t) > 0]
+    if len(all_ts) < 2:
+        return float(max(1, active_months_fallback))
+    def _dt(ms):
+        return datetime.utcfromtimestamp(ms / 1000 if ms > 1e12 else ms)
+    first, last = _dt(min(all_ts)), _dt(max(all_ts))
+    months = (last.year - first.year) * 12 + (last.month - first.month) + 1
+    return float(max(active_months_fallback, months))
+
 def objective_sharpe(result) -> float:
     return result.sharpe_ratio
 
@@ -268,11 +304,13 @@ def objective_monthly(result) -> float:
     wr = result.win_rate / 100.0
 
     # Must have enough trades per month
-    trades_per_month = result.n_trades / max(1, ms['n_months'])
-    if trades_per_month < 3:
+    cal_months = _total_calendar_months(result.trades, ms['n_months'])
+    if result.n_trades / cal_months < 1.0:  # min ~1 trade/month
         return -999.0
+    coverage = min(1.0, ms['n_months'] / cal_months)
+    coverage_factor = coverage ** 0.5
 
-    score = monthly_sr * pct_pos * worst_penalty * (0.5 + 0.5 * wr)
+    score = monthly_sr * pct_pos * worst_penalty * (0.5 + 0.5 * wr) * coverage_factor
     return score
 
 
@@ -303,9 +341,11 @@ def objective_monthly_robust(result) -> float:
     if ms['n_months'] < 2:
         return -999.0
 
-    trades_per_month = result.n_trades / max(1, ms['n_months'])
-    if trades_per_month < 3:
+    cal_months = _total_calendar_months(result.trades, ms['n_months'])
+    if result.n_trades / cal_months < 4.0:  # min ~1.5 trades/month
         return -999.0
+    coverage = min(1.0, ms['n_months'] / cal_months)
+    coverage_factor = coverage ** 0.5
 
     # ── Monthly consistency score ──
     monthly_sr = ms['monthly_sharpe']
@@ -323,7 +363,7 @@ def objective_monthly_robust(result) -> float:
 
     # Leverage penalty: no penalty ≤15x, linear decay 15x→30x
     lev = result.params.get('leverage', 1.0) if hasattr(result, 'params') else 1.0
-    if lev <= 15:
+    if lev <= 25:
         lev_factor = 1.0
     else:
         lev_factor = max(0.3, 1.0 - (lev - 15) / 30.0)  # 30x → 0.5, 45x → 0.0
@@ -338,7 +378,9 @@ def objective_monthly_robust(result) -> float:
     # Profit factor bonus: PF=1.5 → 1.0, PF=3.0 → 1.3
     pf_bonus = min(1.5, result.profit_factor / 2.0) if result.profit_factor > 0 else 0.5
 
-    score = monthly_sr * pct_pos * worst_penalty * wr_factor * lev_factor * dd_factor * pf_bonus
+    score = (monthly_sr * pct_pos * worst_penalty
+             * wr_factor * lev_factor * dd_factor * pf_bonus
+             * coverage_factor)
     return score
 
 
@@ -361,11 +403,13 @@ def objective_weekly(result) -> float:
 
     wr = result.win_rate / 100.0
 
-    trades_per_week = result.n_trades / max(1, ws['n_weeks'])
-    if trades_per_week < 1:
+    cal_weeks = _total_calendar_weeks(result.trades, ws['n_weeks'])
+    if result.n_trades / cal_weeks < 0.2:  # min 1 trade per 5 calendar weeks
         return -999.0
+    coverage = min(1.0, ws['n_weeks'] / cal_weeks)
+    coverage_factor = coverage ** 0.5
 
-    score = weekly_sr * pct_pos * worst_penalty * (0.5 + 0.5 * wr)
+    score = weekly_sr * pct_pos * worst_penalty * (0.5 + 0.5 * wr) * coverage_factor
     return score
 
 
@@ -383,9 +427,17 @@ def objective_weekly_robust(result) -> float:
     if ws['n_weeks'] < 4:
         return -999.0
 
-    trades_per_week = result.n_trades / max(1, ws['n_weeks'])
-    if trades_per_week < 1:
+    # KEY FIX: calendar weeks, not active weeks.
+    # Old: 26 trades / 26 active_weeks  = 1.0/wk → passes (BUG)
+    # New: 26 trades / 156 cal_weeks    = 0.17/wk → -999  (CORRECT)
+    cal_weeks = _total_calendar_weeks(result.trades, ws['n_weeks'])
+    if result.n_trades / cal_weeks < 0.8:  # 1 trade per 5 calendar weeks
         return -999.0
+
+    # Smooth coverage penalty (can't escape by perfecting few active weeks)
+    # 26/156=17% → ×0.41 | 74/156=47% → ×0.69 | 156/156=100% → ×1.0
+    coverage = min(1.0, ws['n_weeks'] / cal_weeks)
+    coverage_factor = coverage ** 0.5
 
     weekly_sr = ws['weekly_sharpe']
     pct_pos = ws['pct_positive'] / 100.0
@@ -403,7 +455,9 @@ def objective_weekly_robust(result) -> float:
 
     pf_bonus = min(1.5, result.profit_factor / 2.0) if result.profit_factor > 0 else 0.5
 
-    score = weekly_sr * pct_pos * worst_penalty * wr_factor * lev_factor * dd_factor * pf_bonus
+    score = (weekly_sr * pct_pos * worst_penalty
+             * wr_factor * lev_factor * dd_factor * pf_bonus
+             * coverage_factor)
     return score
 
 

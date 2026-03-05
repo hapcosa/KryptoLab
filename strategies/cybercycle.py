@@ -107,7 +107,7 @@ class CyberCycleStrategy(IStrategy):
             ParamDef('itrend_alpha', 'float', 0.07, 0.01, 0.30, 0.01),
             ParamDef('trigger_ema', 'int', 14, 3, 30, 3),
             ParamDef('min_bars', 'int', 24, 16, 60, 2),
-            ParamDef('confidence_min', 'float', 75.0, 40.0, 90.0, 5.0),
+            ParamDef('confidence_min', 'float', 75.0, 35.0, 90.0, 5.0),
             ParamDef('ob_level', 'float', 1.5, 0.3, 4.0, 0.1),
             ParamDef('os_level', 'float', -1.5, -4.0, -0.3, 0.1),
 
