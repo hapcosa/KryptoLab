@@ -106,11 +106,14 @@ def evaluate_trial(args) -> dict:
     cfg = _shared['engine_config']
     dd = cfg.get('detail_data')
     dtf = cfg.get('detail_tf')
+    no_intrabar = cfg.get('no_intrabar', False)
 
-    # Use IntrabarBacktestEngine when detail data is available — ensures
-    # optimization and backtest use the exact same execution path.
+    # Use IntrabarBacktestEngine when:
+    #   1. Detail data is available AND
+    #   2. --no-intrabar was NOT passed
+    # --no-intrabar forces BacktestEngine (bar-close signals + detail exits)
     engine = None
-    if dd is not None and dtf is not None:
+    if dd is not None and dtf is not None and not no_intrabar:
         try:
             from core.engine_intrabar import IntrabarBacktestEngine
             engine = IntrabarBacktestEngine(
