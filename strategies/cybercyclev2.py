@@ -19,7 +19,7 @@ from indicators.ehlers import (
     homodyne_alpha, mama_alpha, autocorrelation_alpha,
     kalman_alpha, cybercycle, itrend, fisher_transform,
 )
-from indicators.incremental_ehlers import IncrementalCyberCycle
+from indicators.incremental_ehlers import IncrementalCyberCycleV2
 from indicators.common import ema, sma, atr, crossover, crossunder, volume_ratio
 
 
@@ -436,12 +436,14 @@ class CyberCycleStrategyv2(IStrategy):
     def create_incremental_processor(self, detail_tf_ratio: int = 1):
         """Create incremental processor for intrabar execution.
 
-        Enables IntrabarBacktestEngine to fire signals at the 1m bar
-        where the crossover first occurs, not at 1h close.
+        Uses IncrementalCyberCycleV2 which mirrors the v6.3 confidence
+        scoring (Cross=20, iTrend=25, OB/OS=20, Volume=20, Fisher=10,
+        Momentum=5 — no cycle_strength component) and applies the hard
+        trend filter identically to generate_signal().
 
         Args:
             detail_tf_ratio: detail bars per main-TF bar (e.g. 60 for 1m/1h).
         """
         full_params = self.default_params()
         full_params.update(self.params)
-        return IncrementalCyberCycle(full_params, detail_tf_ratio=detail_tf_ratio)
+        return IncrementalCyberCycleV2(full_params, detail_tf_ratio=detail_tf_ratio)
