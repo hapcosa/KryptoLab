@@ -140,7 +140,6 @@ class BacktestEngine:
                  funding_interval_hours: int = 8,
                  max_positions: int = 1,
                  market_config: dict = None):
-
         self.initial_capital = initial_capital
         self.fee_maker = fee_maker
         self.fee_taker = fee_taker
@@ -806,21 +805,22 @@ class BacktestEngine:
 # ═══════════════════════════════════════════════════════════════
 #  TIMEFRAME DETAIL (Phase 2)
 # ═══════════════════════════════════════════════════════════════
-
 class TimeframeDetail:
     """
-    Provides intra-bar price paths for accurate SL/TP simulation
-    when backtesting on higher timeframes.
+    Maps main-timeframe bars to their intra-bar detail candles.
 
-    Example: Backtesting on 4H with 5m detail data.
-    The signal fires on the 4H close, but SL/TP are checked
-    against every 5m candle within the next 4H bar.
+    OPTIMIZED: usa np.searchsorted para O(log n) lookup en vez de
+    boolean mask O(n) que escaneaba 174K timestamps por cada barra.
+
+    Ejemplo: Backtesting en 1H con datos de 1m detail.
+    La señal se genera en el cierre del 1H, pero SL/TP se checkean
+    contra cada vela de 1m dentro de la siguiente barra de 1H.
     """
 
     DETAIL_MAP = {
         '15m': '1m',
-        '4h': '5m',
-        '1h': '1m',
+        '1h': '1m',     # 60 detail bars (antes era 5m = 12)
+        '4h': '5m',     # 48 detail bars
         '1d': '15m',
         '1w': '1h',
     }
@@ -839,30 +839,49 @@ class TimeframeDetail:
         main_ms = TIMEFRAME_SECONDS.get(main_tf, 14400) * 1000
         self._main_ms = main_ms
 
+        # ── PRE-COMPUTE: índices de inicio/fin para cada barra principal ──
+        # Esto convierte el lookup de O(n) por barra a O(1) amortizado
+        n_main = len(main_timestamps)
+        self._bar_start = np.zeros(n_main, dtype=np.int64)
+        self._bar_end = np.zeros(n_main, dtype=np.int64)
+
+        for i in range(n_main):
+            start_ts = main_timestamps[i]
+            if i < n_main - 1:
+                end_ts = main_timestamps[i + 1]
+            else:
+                end_ts = start_ts + main_ms
+
+            # O(log n) con searchsorted
+            self._bar_start[i] = np.searchsorted(
+                self.detail_timestamps, start_ts, side='left')
+            self._bar_end[i] = np.searchsorted(
+                self.detail_timestamps, end_ts, side='left')
+
     def get_intrabar_candles(self, main_bar_idx: int) -> dict:
         """
         Get all detail candles within a main timeframe bar.
         Returns dict with open, high, low, close arrays.
+
+        OPTIMIZADO: O(1) lookup usando índices pre-computados.
+        Antes: boolean mask sobre 174K timestamps = O(n) POR BARRA.
+        Ahora: slice directo = O(1).
         """
         if main_bar_idx >= len(self.main_timestamps) - 1:
             return None
 
-        start_ts = self.main_timestamps[main_bar_idx]
-        end_ts = self.main_timestamps[main_bar_idx + 1]
+        i_start = self._bar_start[main_bar_idx]
+        i_end = self._bar_end[main_bar_idx]
 
-        mask = ((self.detail_timestamps >= start_ts) &
-                (self.detail_timestamps < end_ts))
-
-        if not np.any(mask):
+        if i_start >= i_end:
             return None
 
         return {
-            'open': self.detail_open[mask],
-            'high': self.detail_high[mask],
-            'low': self.detail_low[mask],
-            'close': self.detail_close[mask],
+            'open':  self.detail_open[i_start:i_end],
+            'high':  self.detail_high[i_start:i_end],
+            'low':   self.detail_low[i_start:i_end],
+            'close': self.detail_close[i_start:i_end],
         }
-
 
 # ═══════════════════════════════════════════════════════════════
 #  RESULT FORMATTING
