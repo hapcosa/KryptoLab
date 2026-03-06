@@ -43,6 +43,9 @@ def get_strategy(name: str):
     elif name in ('smartmoney', 'smc', 'sm'):
         from strategies.smartmoney import SmartMoneyStrategy
         return SmartMoneyStrategy()
+    elif name in ('cybercyclev2','ccv2','cyberv2'):
+        from strategies.cybercyclev2 import CyberCycleStrategyv2
+        return CyberCycleStrategyv2()
     else:
         raise ValueError(f"Unknown strategy: {name}. Options: cybercycle, gaussbands, smartmoney")
 
@@ -61,7 +64,7 @@ def _get_n_jobs(args):
         return max(1, n_jobs_raw) if n_jobs_raw > 0 else 1
 
 
-def _build_engine_config(capital, detail_info, market_config=None):
+def _build_engine_config(capital, detail_info, market_config=None, no_intrabar: bool = False):
     """Build serializable engine config for parallel workers."""
     _detail = detail_info or {'data': None, 'tf': None}
     return {
@@ -69,6 +72,7 @@ def _build_engine_config(capital, detail_info, market_config=None):
         'market_config': market_config,
         'detail_data': _detail.get('data'),
         'detail_tf': _detail.get('tf'),
+        'no_intrabar': no_intrabar,
     }
 
 
@@ -279,10 +283,14 @@ def cmd_backtest(args):
     market = MarketConfig.detect(symbol)
 
     # Create engine with detail data
-    engine_factory = _make_engine_factory(capital, detail_info, market)
+    no_intrabar = args.get('no_intrabar', False)
+    engine_factory = _make_engine_factory(capital, detail_info, market, no_intrabar=no_intrabar)
 
     # Run backtest
-    print("🚀 Running backtest...")
+    if no_intrabar:
+        print("🚀 Running backtest... [bar-close mode — no intrabar signal timing]")
+    else:
+        print("🚀 Running backtest... [intrabar mode — incremental Ehlers, 1m signal timing]")
     t0 = time.time()
 
     engine = engine_factory()
@@ -430,7 +438,8 @@ def cmd_validate(args):
     # Load data + detail data
     data, detail_info, symbol, timeframe = _load_data(args, timeframe)
 
-    engine_factory = _make_engine_factory(capital, detail_info)
+    no_intrabar = args.get('no_intrabar', False)
+    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
     param_grid = _build_validation_grid(strategy)
 
     # ── Parallel setup ──
@@ -440,7 +449,7 @@ def cmd_validate(args):
         try:
             from optimize.anti_overfit_parallel import ParallelAntiOverfitPipeline
 
-            engine_config = _build_engine_config(capital, detail_info)
+            engine_config = _build_engine_config(capital, detail_info, no_intrabar=no_intrabar)
             _print_parallel_info(n_jobs)
             print()
 
@@ -530,6 +539,7 @@ def _load_data(args, timeframe='4h'):
     tf = args.get('timeframe', timeframe)
     start = args.get('start', '2023-01-01')
     end = args.get('end', '2025-01-01')
+    exchange = args.get('exchange', 'bitget')
 
     # Allow user override of detail TF (e.g. --detail-tf 1m)
     detail_tf_override = args.get('detail_tf', None)
@@ -539,7 +549,7 @@ def _load_data(args, timeframe='4h'):
         df = generate_sample_data(n_bars=5000, timeframe=tf)
     else:
         # Use DataManager: checks cache, downloads if needed
-        dm = DataManager(verbose=True)
+        dm = DataManager(exchange=exchange, verbose=True)
 
         # Check if data is cached
         cache = DataCache()
@@ -573,7 +583,7 @@ def _load_data(args, timeframe='4h'):
     detail_info = {'data': None, 'tf': None}
 
     if not use_sample and not no_detail:
-        dm = DataManager(verbose=True)
+        dm = DataManager(exchange=exchange, verbose=True)
 
         # Determine detail TF: user override > default map
         if detail_tf_override:
@@ -610,10 +620,8 @@ def _load_data(args, timeframe='4h'):
     return data, detail_info, symbol, tf
 
 
-def _make_engine_factory(capital, detail_info=None, market_config=None):
-    _detail = detail_info or {'data': None, 'tf': None}
-    _dd = _detail.get('data')
-    _dtf = _detail.get('tf')
+def _make_engine_factory(capital, detail_info=None, market_config=None,
+                         no_intrabar: bool = False):
     """
     Create an engine_factory that produces BacktestEngines
     with detail data and market config pre-loaded.
@@ -622,27 +630,43 @@ def _make_engine_factory(capital, detail_info=None, market_config=None):
     use the same intra-bar simulation as backtest.
 
     Args:
-        capital: Initial capital in USDT
-        detail_info: {'data': dict|None, 'tf': str|None} from _load_data
+        capital:      Initial capital in USDT
+        detail_info:  {'data': dict|None, 'tf': str|None} from _load_data
         market_config: MarketConfig dict or None
+        no_intrabar:  If True, force BacktestEngine (bar-close signals,
+                      no IncrementalCyberCycle). Detail data is still
+                      loaded for intra-bar exit simulation (SL/TP/trailing).
+                      Use --no-intrabar to compare both signal modes.
 
     Returns:
         Callable that returns a configured BacktestEngine
     """
+    _detail = detail_info or {'data': None, 'tf': None}
+    _dd = _detail.get('data')
+    _dtf = _detail.get('tf')
 
-    def factory():  # ← import AQUÍ DENTRO
-        try:
-            from core.engine_intrabar import IntrabarBacktestEngine
-            engine = IntrabarBacktestEngine(
-                initial_capital=capital,
-                market_config=market_config,
-            )
-        except ImportError:
+    def factory():
+        if no_intrabar:
+            # Bar-close signal mode: signals fire at main-TF bar close.
+            # Still uses detail data for exit precision (SL/TP/trailing).
             from core.engine import BacktestEngine
             engine = BacktestEngine(
                 initial_capital=capital,
                 market_config=market_config,
             )
+        else:
+            try:
+                from core.engine_intrabar import IntrabarBacktestEngine
+                engine = IntrabarBacktestEngine(
+                    initial_capital=capital,
+                    market_config=market_config,
+                )
+            except ImportError:
+                from core.engine import BacktestEngine
+                engine = BacktestEngine(
+                    initial_capital=capital,
+                    market_config=market_config,
+                )
         if _dd is not None and _dtf is not None:
             engine.set_detail_data(_dd, _dtf)
         return engine
@@ -702,11 +726,12 @@ def cmd_optimize(args):
             print(f"   ✅ Optimizing {len(param_subset)} of {len(valid_names)} params")
 
     data, detail_info, symbol, tf = _load_data(args)
-    engine_factory = _make_engine_factory(capital, detail_info)
+    no_intrabar = args.get('no_intrabar', False)
+    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
 
     # ── Parallel setup ──
     n_jobs = _get_n_jobs(args)
-    engine_config = _build_engine_config(capital, detail_info)
+    engine_config = _build_engine_config(capital, detail_info, no_intrabar=no_intrabar)
 
     method_labels = {
         'grid': 'Grid Search',
@@ -959,12 +984,13 @@ def cmd_regime(args):
     _load_params_file(args, strategy)
 
     data, detail_info, symbol, tf = _load_data(args)
+    no_intrabar = args.get('no_intrabar', False)
 
     print(f"\n🔄 CryptoLab — Regime Detection & Analysis")
     print(f"   Strategy: {strategy.name()}")
     print(f"   {symbol} | {tf}\n")
 
-    engine_factory = _make_engine_factory(capital, detail_info)
+    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
 
     # ── Try parallel (concurrent detect + backtest) ──
     try:
@@ -991,12 +1017,13 @@ def cmd_ensemble(args):
     """Run ensemble of all 3 strategies."""
     capital = args.get('capital', 10000.0)
     data, detail_info, symbol, tf = _load_data(args)
+    no_intrabar = args.get('no_intrabar', False)
 
     print(f"\n🎯 CryptoLab — Strategy Ensemble")
     print(f"   Methods: CyberCycle + GaussBands + SmartMoney")
     print(f"   {symbol} | {tf}\n")
 
-    engine_factory = _make_engine_factory(capital, detail_info)
+    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
 
     from ml.ensemble import EnsembleBuilder
 
@@ -1028,13 +1055,14 @@ def cmd_targets(args):
     _load_params_file(args, strategy)
 
     data, detail_info, symbol, tf = _load_data(args)
+    no_intrabar = args.get('no_intrabar', False)
 
     print(f"\n📅 CryptoLab — Temporal Target Analysis")
     print(f"   Strategy: {strategy.name()}")
     print(f"   {symbol} | {tf}")
     print(f"   Targets: {target_preset}\n")
 
-    engine_factory = _make_engine_factory(capital, detail_info)
+    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
 
     from ml.temporal_targets import (
         CONSERVATIVE_TARGETS, AGGRESSIVE_TARGETS, CONSISTENCY_TARGETS,
@@ -1080,11 +1108,12 @@ def cmd_combinatorial(args):
     """Search for optimal strategy combinations."""
     capital = args.get('capital', 10000.0)
     data, detail_info, symbol, tf = _load_data(args)
+    no_intrabar = args.get('no_intrabar', False)
 
     print(f"\n🧬 CryptoLab — Combinatorial Strategy Search")
     print(f"   {symbol} | {tf}\n")
 
-    engine_factory = _make_engine_factory(capital, detail_info)
+    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
 
     from ml.combinatorial import CombinatorialSearch, StrategyConfig
 
@@ -1133,8 +1162,9 @@ def cmd_download(args):
     start = args.get('start', '2023-01-01')
     end = args.get('end', '2025-01-01')
     batch = args.get('batch', None)  # 'crypto' or 'stocks' or 'all'
+    exchange = args.get('exchange', 'bitget')
 
-    dm = DataManager(verbose=True)
+    dm = DataManager(exchange=exchange, verbose=True)
 
     if batch:
         if batch == 'crypto':
@@ -1270,7 +1300,8 @@ def cmd_data(args):
     from data.data_manager import DataManager
 
     subcommand = args.get('data_cmd', 'list')
-    dm = DataManager(verbose=True)
+    exchange = args.get('exchange', 'bitget')
+    dm = DataManager(exchange=exchange, verbose=True)
 
     if subcommand == 'list':
         infos = dm.list_cached()
@@ -1379,6 +1410,9 @@ def main():
 ║    --batch      STR        crypto|stocks|all|SYM1,SYM2,...   ║
 ║    --detail-tf  STR        Override detail TF (e.g. 1m, 5m) ║
 ║    --no-detail             Disable detail data loading       ║
+║    --no-intrabar           Bar-close signals (no incremental ║
+║                            Ehlers). Detail still used for    ║
+║                            SL/TP exits. Compare both modes.  ║
 ║    --params-file PATH      Load params from JSON file        ║
 ║    --objective  STR        sharpe|return|calmar|composite    ║
 ║                           monthly|monthly_robust            ║
@@ -1447,6 +1481,9 @@ def main():
             i += 2
         elif arg == '--no-detail':
             args['no_detail'] = True
+            i += 1
+        elif arg == '--no-intrabar':
+            args['no_intrabar'] = True
             i += 1
         elif arg == '--force':
             args['force'] = True

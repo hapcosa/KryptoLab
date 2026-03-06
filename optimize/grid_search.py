@@ -342,7 +342,7 @@ def objective_monthly_robust(result) -> float:
         return -999.0
 
     cal_months = _total_calendar_months(result.trades, ms['n_months'])
-    if result.n_trades / cal_months < 4.0:  # min ~1.5 trades/month
+    if result.n_trades / cal_months < 3.5:  # min ~1.5 trades/month
         return -999.0
     coverage = min(1.0, ms['n_months'] / cal_months)
     coverage_factor = coverage ** 0.5

@@ -639,3 +639,212 @@ class IncrementalCyberCycle:
     @property
     def bar_count(self) -> int:
         return self._bar
+
+# ═══════════════════════════════════════════════════════════════
+#  IncrementalCyberCycleV2  — Confidence scoring v6.3
+#
+#  Identical core mechanics to IncrementalCyberCycle (v7.1) but
+#  uses the v6.3 confidence weighting scheme:
+#
+#  v7.1 weights (100 pts):
+#    Cross=20, iTrend=20, OB/OS=15, Volume=15, Fisher=10, Momentum=10, CycleStr=10
+#
+#  v6.3 weights (100 pts):
+#    Cross=20, iTrend=25, OB/OS=20, Volume=20, Fisher=10, Momentum=5
+#    → No cycle_strength component
+#    → Supports all 5 alpha methods (homodyne/mama/autocorrelation/kalman/manual)
+#
+#  Also mirrors the v6.3 vectorized generate_signal() behaviour:
+#    - Hard trend filter applied AFTER confidence check (same as cybercyclev2.py)
+#    - No cycle_str_lookback / cycle_str_pctile params needed
+# ═══════════════════════════════════════════════════════════════
+
+class IncrementalCyberCycleV2(IncrementalCyberCycle):
+    """
+    Incremental processor for CyberCycleStrategyv2 (v6.3).
+
+    Subclasses IncrementalCyberCycle and overrides only the
+    confidence scoring section of _compute(), so all partial-bar
+    snapshot/restore logic, ATR, itrend, Fisher, volume, etc.
+    are reused without duplication.
+
+    Confidence v6.3 (max 100):
+        Cross signal:  20
+        iTrend:        25  (+5 vs v7.1, absorbs HTF slot)
+        OB/OS zone:    20  (+5 vs v7.1)
+        Volume:        20  (+5 vs v7.1)
+        Fisher:        10
+        Momentum:       5  (-5 vs v7.1, weakest signal)
+        ─────────────────
+        Total:        100  (no cycle_strength component)
+    """
+
+    def _compute(self, high, low, close, volume, ts, commit) -> Optional[Signal]:
+        i   = self._bar
+        hl2 = (high + low) / 2.0
+
+        # 1. Alpha — same as parent
+        alpha, period = (self._alpha.update(hl2) if commit
+                         else self._alpha.update_partial(hl2))
+        floor = self.p.get('alpha_floor', 0.0)
+        if floor > 0: alpha = max(alpha, floor)
+
+        # 2. CyberCycle — same as parent
+        self._src.push(hl2)
+        s0,s1,s2,s3 = (self._src.ago(k) for k in range(4))
+        sm = (s0+2*s1+2*s2+s3)/6.0; self._sm.push(sm)
+        if i < 7:
+            cyc = (s0-2*s1+s2)/4.0 if i >= 2 else 0.0
+        else:
+            a   = alpha
+            m0,m1,m2 = self._sm.ago(0), self._sm.ago(1), self._sm.ago(2)
+            c1, c2   = self._cyc.ago(0), self._cyc.ago(1)
+            cyc = ((1-0.5*a)**2*(m0-2*m1+m2) + 2*(1-a)*c1 - (1-a)**2*c2)
+
+        # 3. Trigger — same as parent
+        self._pcy = self._cyc.ago(0)
+        self._ptr = self._trig
+        self._cyc.push(cyc)
+        k = self._tk
+        self._trig = cyc if not self._ti else k*cyc+(1-k)*self._trig
+        self._ti   = True
+
+        # 4. iTrend — same as parent
+        self._cl.push(close)
+        a = self._ita
+        if i < 3:
+            it = close
+        else:
+            c0,c1c,c2c = self._cl.ago(0),self._cl.ago(1),self._cl.ago(2)
+            t1,t2 = self._it.ago(0), self._it.ago(1)
+            it = ((a-a*a/4)*c0 + 0.5*a*a*c1c - (a-0.75*a*a)*c2c
+                  + 2*(1-a)*t1 - (1-a)**2*t2)
+        self._it.push(it)
+        bull_t = it > self._it.ago(2) if i >= 2 else False
+        bear_t = it < self._it.ago(2) if i >= 2 else False
+
+        # 5. Fisher — same as parent
+        self._cw.push(cyc)
+        fL,fH = self._cw.min_max(); fR = fH-fL
+        fV = max(-0.999, min(0.999, 2*((cyc-fL)/fR-0.5) if fR else 0.0))
+        f  = 0.5*math.log((1+fV)/(1-fV))
+        fish = 0.5*f + 0.5*self._fish
+        fu   = fish > self._fish; fd = fish < self._fish
+        self._fish = fish
+
+        # 6. ATR — same as parent
+        if i == 0:
+            self._pc=close; self._atr=high-low
+        else:
+            tr = max(high-low, abs(high-self._pc), abs(low-self._pc))
+            if self._atrc < 14:
+                self._atr=(self._atr*self._atrc+tr)/(self._atrc+1); self._atrc+=1
+            else:
+                self._atr=(self._atr*13+tr)/14
+        self._pc=close; atr=self._atr
+
+        # 7. Volume — same as parent
+        if self._vb.count >= 20: self._vs -= self._vb.ago(19)
+        self._vb.push(volume); self._vs += volume
+        vsma    = self._vs/self._vb.count if self._vb.count else 1.0
+        use_vol = self.p.get('use_volume', True)
+        vol_ok  = (not use_vol) or (volume/vsma >= self.p.get('volume_mult', 2.0) if vsma > 0 else True)
+
+        # 8. OB/OS + momentum — same as parent
+        in_ob = cyc >  self.p.get('ob_level',  1.5)
+        in_os = cyc <  self.p.get('os_level', -1.5)
+        mom3  = cyc - self._cyc.ago(3) if i >= 3 else 0.0
+
+        # 9. Crossover — same as parent
+        bull_x = (self._pcy <= self._ptr) and (cyc > self._trig)
+        bear_x = (self._pcy >= self._ptr) and (cyc < self._trig)
+
+        if commit: self._bar += 1
+
+        # ── Signal gates ──
+        if i < 10: return None
+        if not (bull_x or bear_x): return None
+
+        min_bars = self.p.get('min_bars', 24)
+        if i - self._lsb < min_bars: return None
+
+        is_buy    = bull_x
+        use_trend = self.p.get('use_trend', True)
+
+        # ── Confidence v6.3 — NO cycle_strength component ──
+        conf = 0.0
+        if is_buy:
+            if bull_x:                              conf += 20.0
+            if (bull_t if use_trend else True):     conf += 25.0
+            if in_os:                               conf += 20.0
+            if vol_ok:                              conf += 20.0
+            if fu:                                  conf += 10.0
+            if mom3 > 0:                            conf +=  5.0
+        else:
+            if bear_x:                              conf += 20.0
+            if (bear_t if use_trend else True):     conf += 25.0
+            if in_ob:                               conf += 20.0
+            if vol_ok:                              conf += 20.0
+            if fd:                                  conf += 10.0
+            if mom3 < 0:                            conf +=  5.0
+        conf = min(conf, 100.0)
+        if conf < self.p.get('confidence_min', 80.0): return None
+
+        # ── Hard trend filter (mirrors cybercyclev2.generate_signal) ──
+        if use_trend:
+            if is_buy  and not bull_t: return None
+            if not is_buy and not bear_t: return None
+
+        # Daily cap — same as parent
+        max_daily = self.p.get('max_signals_per_day', 0)
+        if max_daily > 0:
+            day = ts // 86400000
+            if day != self._cd: self._cd=day; self._dc=0
+            if self._dc >= max_daily: return None
+            self._dc += 1
+
+        self._lsb = i
+
+        # ── Build Signal ──
+        direction = 1 if is_buy else -1
+        entry = close
+        if self.p.get('sltp_type', 'slatr_tprr') == 'sltp_fixed':
+            sl_d = entry * (1 - direction * self.p.get('sl_fixed_pct', 2.5) / 100)
+            tp1  = entry * (1 + direction * self.p.get('tp1_fixed_pct', 3.0) / 100)
+            tp2  = entry * (1 + direction * self.p.get('tp2_fixed_pct', 4.5) / 100)
+            tp1s = self.p.get('tp1_fixed_size', 0.7)
+            sld  = abs(entry - sl_d)
+        else:
+            sld  = atr * self.p.get('sl_atr_mult', 1.5)
+            sl_d = entry - direction * sld
+            tp1s = self.p.get('tp1_size', 0.6)
+            tp1  = entry + direction * sld * self.p.get('tp1_rr', 2.0)
+            tp2  = entry + direction * sld * self.p.get('tp2_rr', 3.0)
+        tp2s   = round(1.0 - tp1s, 8)
+        be_pct = self.p.get('be_pct', 0.5)
+        be_t   = entry * (1 + direction * be_pct / 100) if be_pct > 0 else 0.0
+        utl    = self.p.get('use_trailing', True)
+        tpull  = self.p.get('trail_pullback_pct', 0.5)
+        tdist  = entry * (tpull / 100) if utl else 0.0
+        if utl:
+            tact = entry * (1 + direction * self.p.get('trail_activate_pct', 1.0) / 100)
+            be_t = be_t if (be_pct > 0 and abs(be_t - entry) <= abs(tact - entry)) else tact
+
+        return Signal(
+            direction=direction, confidence=conf,
+            entry_price=entry, sl_price=sl_d,
+            tp_levels=[tp1, tp2], tp_sizes=[tp1s, tp2s],
+            leverage=self.p.get('leverage', 3.0),
+            be_trigger=be_t, trailing=utl, trailing_distance=tdist,
+            metadata={
+                'close_on_signal': self.p.get('close_on_signal', True),
+                'max_signals_per_day': max_daily,
+                'alpha_method': self.p.get('alpha_method', 'manual'),
+                'alpha': alpha, 'period': period,
+                'cycle': cyc, 'fisher': fish,
+                'sl_dist_atr': sld / atr if atr > 0 else 0,
+                'tp1': tp1, 'tp2': tp2,
+                'be_pct': be_pct, 'trail_pct': tpull if utl else 0,
+                'partial_bar': not commit,
+            }
+        )
