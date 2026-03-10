@@ -757,13 +757,10 @@ class BacktestEngine:
 
         max_dd = np.max(drawdown) if len(drawdown) > 0 else 0.0
 
-        # Annualized return estimate
-        # Annualized return — CAGR (Compound Annual Growth Rate)
-        # Use real timestamps for accurate year calculation
+        # Annualized return — CAGR using actual timestamps
         if 'timestamp' in data and len(data['timestamp']) >= 2:
             ts_start = data['timestamp'][0]
             ts_end = data['timestamp'][-1]
-            # Handle ms vs s timestamps
             if ts_start > 1e12:
                 total_seconds_real = (ts_end - ts_start) / 1000.0
             else:
@@ -773,13 +770,10 @@ class BacktestEngine:
             tf_seconds = TIMEFRAME_SECONDS.get(timeframe, 14400)
             years = (n * tf_seconds) / (365.25 * 86400)
 
-        # CAGR: correcto para compound returns
         if years > 0.01 and total_return > -100:
             annual_return = ((1.0 + total_return / 100.0) ** (1.0 / years) - 1.0) * 100.0
         else:
             annual_return = 0.0
-
-        calmar = annual_return / max_dd if max_dd > 0 else 0.0
 
         # Dates
         start_date = ""

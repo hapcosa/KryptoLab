@@ -88,7 +88,7 @@ class AntiOverfitResult:
         lines.append(f"\n  {_icon(self.wfa_passed)} Layer 1: Walk-Forward Analysis")
         if self.wfa_result:
             lines.append(f"     WFE (Sharpe): {self.wfa_result.wfe_sharpe:.3f}"
-                         f"  (threshold: 0.3)")
+                         f"  (threshold: 0.30)")
             lines.append(f"     Avg IS→OOS Sharpe: {self.wfa_result.avg_is_sharpe:.2f}"
                          f" → {self.wfa_result.avg_oos_sharpe:.2f}")
 
@@ -96,7 +96,7 @@ class AntiOverfitResult:
         lines.append(f"\n  {_icon(self.pkfold_passed)} Layer 2: Purged K-Fold CV")
         if self.pkfold_result:
             lines.append(f"     Degradation: {self.pkfold_result.sharpe_degradation:.1f}%"
-                         f"  (threshold: 40%)")
+                         f"  (threshold: 50%)")
             lines.append(f"     Train→Test Sharpe: "
                          f"{self.pkfold_result.avg_train_sharpe:.2f}"
                          f" → {self.pkfold_result.avg_test_sharpe:.2f}"
@@ -106,7 +106,7 @@ class AntiOverfitResult:
         lines.append(f"\n  {_icon(self.dsr_passed)} Layer 3: Deflated Sharpe Ratio")
         if self.dsr_result:
             lines.append(f"     DSR: {self.dsr_result.deflated_sharpe:.3f}"
-                         f"  (threshold: 0.5)")
+                         f"  (threshold: 0.30)")
             lines.append(f"     Observed SR: {self.dsr_result.observed_sharpe:.2f}"
                          f"  E[max SR|{self.dsr_result.n_trials} eff. trials]: "
                          f"{self.dsr_result.expected_max_sharpe:.2f}")
@@ -118,7 +118,7 @@ class AntiOverfitResult:
         if self.mc_results and 'trade_shuffle' in self.mc_results:
             ts = self.mc_results['trade_shuffle']
             lines.append(f"     p-value (trade shuffle): {ts.p_value:.4f}"
-                         f"  (threshold: 0.05)")
+                         f"  (threshold: 0.10)")
             lines.append(f"     90% CI: [{ts.ci_lower:.2f}, {ts.ci_upper:.2f}]")
 
         # Overall verdict
