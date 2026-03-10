@@ -153,6 +153,7 @@ class PurgedKFoldCV:
                 sliced[key] = val
         return sliced
 
+
     def run(self,
             strategy,
             data: dict,
@@ -201,13 +202,17 @@ class PurgedKFoldCV:
             train_data = self._slice_by_indices(data, train_idx)
             test_data = self._slice_by_indices(data, test_idx)
 
-            # Run on training set
-            strat_train = copy.deepcopy(strategy)
+            # FIX: Don't use copy.deepcopy (breaks complex strategy objects)
+            # Create fresh instances and apply params explicitly
+            strategy_class = type(strategy)
+
+            strat_train = strategy_class()
+            strat_train.set_params(strategy.params)
             engine_train = engine_factory()
             train_result = engine_train.run(strat_train, train_data, symbol, timeframe)
 
-            # Run on test set (same params)
-            strat_test = copy.deepcopy(strategy)
+            strat_test = strategy_class()
+            strat_test.set_params(strategy.params)
             engine_test = engine_factory()
             test_result = engine_test.run(strat_test, test_data, symbol, timeframe)
 

@@ -99,9 +99,14 @@ def evaluate_trial(args) -> dict:
 
     t0 = time.time()
 
-    # Deep-copy strategy (each trial gets its own)
-    strategy = copy.deepcopy(_shared['strategy'])
-    strategy.set_params(params_to_set)
+    # FIX: Don't use copy.deepcopy (breaks complex strategy objects like
+    # CyberCycleStrategy with Ehlers filters, numpy state, etc.)
+    # Create a fresh instance and apply base params + trial params.
+    original_strategy = _shared['strategy']
+    strategy_class = type(original_strategy)
+    strategy = strategy_class()
+    strategy.set_params(original_strategy.params)  # Base params (from JSON/defaults)
+    strategy.set_params(params_to_set)              # Override with trial's optimized params
 
     cfg = _shared['engine_config']
     dd = cfg.get('detail_data')
@@ -162,7 +167,6 @@ def evaluate_trial(args) -> dict:
         'objective_value': obj_val,
         'elapsed': elapsed,
     }
-
 
 def get_n_jobs(requested: int = -1) -> int:
     """

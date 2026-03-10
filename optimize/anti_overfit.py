@@ -285,11 +285,11 @@ class AntiOverfitPipeline:
         best_params = {}
         if wfa_result.windows:
             best_params = wfa_result.windows[-1].best_params
+        strategy_class = type(strategy)
+        strat_pkfold = strategy_class()
+        strat_pkfold.set_params(strategy.params)
         if best_params:
-            strat_pkfold = copy.deepcopy(strategy)
             strat_pkfold.set_params(best_params)
-        else:
-            strat_pkfold = copy.deepcopy(strategy)
 
         pkfold_result = self.pkfold.run(
             strategy=strat_pkfold,
@@ -321,9 +321,11 @@ class AntiOverfitPipeline:
             print(f"{'─'*60}")
 
         # Run a full backtest with best params to get equity curve
-        strat_full = copy.deepcopy(strategy)
+        strategy_class = type(strategy)
+        strat_full = strategy_class()
+        strat_full.set_params(strategy.params)
         if best_params:
-            strat_full.set_params(best_params)
+            strat_full.set_params(best_params
         engine_full = engine_factory()
         full_result = engine_full.run(strat_full, data, symbol, timeframe)
         n_backtests += 1

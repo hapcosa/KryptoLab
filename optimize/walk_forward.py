@@ -168,8 +168,12 @@ class WalkForwardAnalyzer:
             best_params = {}
 
             for combo in self._param_combinations(param_grid):
-                strat_copy = copy.deepcopy(strategy)
-                strat_copy.set_params(combo)
+                # FIX: Don't deepcopy (breaks complex strategies).
+                # Create fresh instance and apply base params + combo.
+                strategy_class = type(strategy)
+                strat_copy = strategy_class()
+                strat_copy.set_params(strategy.params)  # Base params from trial
+                strat_copy.set_params(combo)  # Override with grid combo
 
                 engine = engine_factory()
                 result = engine.run(strat_copy, is_data, symbol, timeframe)
@@ -184,8 +188,11 @@ class WalkForwardAnalyzer:
             win.best_params = best_params
 
             # Validate on OOS with best params
-            strat_oos = copy.deepcopy(strategy)
-            strat_oos.set_params(best_params)
+
+            strategy_class = type(strategy)
+            strat_oos = strategy_class()
+            strat_oos.set_params(strategy.params)  # Base params from trial
+            strat_oos.set_params(best_params)       # Override with WFA best
 
             engine = engine_factory()
             oos_result = engine.run(strat_oos, oos_data, symbol, timeframe)

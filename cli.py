@@ -460,37 +460,113 @@ def cmd_validate(args):
 
     return result
 def _build_validation_grid(strategy) -> dict:
-    """Build a compact param grid for validation from strategy parameter defs."""
+    """
+    Build a param grid for WFA validation centered on the strategy's
+    CURRENT params (from --params-file / --trial).
+
+    Two-phase approach:
+      Phase A — STABILITY: include the current values as-is
+               (tests if the trial works across time windows)
+      Phase B — SENSITIVITY: include current ± small perturbation
+               (tests if nearby params also work, proving robustness)
+
+    For each param: [current - step, current, current + step]
+    Clamped to [min_val, max_val].
+
+    Only uses top 3 most impactful params to keep grid at 27 combos.
+    The other ~30 params stay FIXED at the trial's values.
+
+    WHY THIS IS CORRECT:
+      - Bayesian already explored 150+ combos globally.
+      - WFA's job is NOT to re-discover params (Bayesian did that).
+      - WFA's job IS to verify that the CHOSEN params are temporally stable.
+      - Small perturbations test that we're not on a "cliff" in param space
+        (where moving confidence_min from 72 to 73 destroys the strategy).
+    """
     grid = {}
+
     for pdef in strategy.parameter_defs():
+        # Get current value from loaded params (or default)
+        current = strategy.params.get(pdef.name, pdef.default)
+
         if pdef.ptype == 'categorical':
-            grid[pdef.name] = pdef.options[:3]  # max 3 options
+            # Include current + 1-2 alternatives
+            options = list(pdef.options)
+            if current in options:
+                others = [o for o in options if o != current][:2]
+                grid[pdef.name] = [current] + others
+            else:
+                grid[pdef.name] = options[:3]
+
         elif pdef.ptype == 'float' and pdef.min_val is not None:
-            # 3 values: low, default, high
             lo = pdef.min_val
             hi = pdef.max_val
-            mid = pdef.default
-            grid[pdef.name] = sorted(set([lo, mid, hi]))[:3]
+            step = pdef.step if pdef.step else (hi - lo) / 10.0
+
+            # Small perturbation: ±2 steps from current
+            v_lo = round(max(lo, float(current) - step * 2), 4)
+            v_mid = round(float(current), 4)
+            v_hi = round(min(hi, float(current) + step * 2), 4)
+
+            values = sorted(set([v_lo, v_mid, v_hi]))
+            grid[pdef.name] = values[:3]
+
         elif pdef.ptype == 'int' and pdef.min_val is not None:
             lo = pdef.min_val
             hi = pdef.max_val
-            mid = pdef.default
-            grid[pdef.name] = sorted(set([lo, mid, hi]))[:3]
+            step = pdef.step if pdef.step else max(1, (hi - lo) // 5)
 
-    # Keep grid manageable — only use the 3 most impactful params
-    # Priority: alpha_method > confidence_min > leverage (for CyberCycle)
-    priority_keys = ['alpha_method', 'confidence_min', 'leverage', 'signal_mode',
-                     'length', 'swing_length', 'mode']
+            v_lo = max(lo, int(current) - step)
+            v_mid = int(current)
+            v_hi = min(hi, int(current) + step)
+
+            values = sorted(set([v_lo, v_mid, v_hi]))
+            grid[pdef.name] = values[:3]
+
+        elif pdef.ptype == 'bool':
+            grid[pdef.name] = [bool(current)]  # Don't vary booleans
+
+    # ── Select top 3 most impactful params ──
+    # These are the params where small changes have the biggest effect.
+    # Order matters: first found = first included.
+    priority_keys = [
+        'confidence_min',      # Controls signal frequency directly
+        'sl_atr_mult',         # Controls risk/reward ratio
+        'tp1_rr',              # Controls profit taking
+        'alpha_method',        # Changes entire signal generation
+        'leverage',            # Scales everything (but often fixed by user)
+        'trail_pullback_pct',  # Trailing stop sensitivity
+        'be_pct',              # Break-even trigger
+        'signal_mode',         # GaussBands
+        'length',              # GaussBands / SMC
+        'swing_length',        # SMC
+    ]
 
     small_grid = {}
     for key in priority_keys:
-        if key in grid:
+        if key in grid and len(grid[key]) > 1:  # Only include if there's variation
             small_grid[key] = grid[key]
         if len(small_grid) >= 3:
             break
 
-    return small_grid if small_grid else grid
+    # If we don't have 3 varying params, allow single-value params too
+    # (this means WFA just tests stability without perturbation for that param)
+    if len(small_grid) < 3:
+        for key in priority_keys:
+            if key in grid and key not in small_grid:
+                small_grid[key] = grid[key]
+            if len(small_grid) >= 3:
+                break
 
+    # Last resort: grab any remaining
+    if len(small_grid) < 3:
+        for key in grid:
+            if key not in small_grid:
+                small_grid[key] = grid[key]
+            if len(small_grid) >= 3:
+                break
+
+    return small_grid if small_grid else grid
 
 def _load_data(args, timeframe='4h'):
     """

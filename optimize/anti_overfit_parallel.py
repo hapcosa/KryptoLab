@@ -65,7 +65,17 @@ def _make_engine_from_config(cfg):
     if dd is not None and dtf is not None:
         engine.set_detail_data(dd, dtf)
     return engine
-
+def _fresh_strategy_from_state():
+    """
+    Create a fresh strategy instance from worker state.
+    Replaces copy.deepcopy(state['strategy']) which breaks complex objects.
+    """
+    state = _VALIDATE_STATE
+    original = state['strategy']
+    strategy_class = type(original)
+    strat = strategy_class()
+    strat.set_params(original.params)
+    return strat
 
 # ═══════════════════════════════════════════════════════════════
 #  TOP-LEVEL WORKER FUNCTIONS (must be pickleable)
@@ -80,7 +90,6 @@ def _worker_wfa_window(args):
     """
     window_id, is_idx, oos_idx = args
     state = _VALIDATE_STATE
-    strategy = copy.deepcopy(state['strategy'])
     data = state['data']
     cfg = state['engine_config']
     symbol = state['symbol']
@@ -96,16 +105,17 @@ def _worker_wfa_window(args):
         return sliced
 
     try:
+        # FIX: Use fresh strategy instances instead of deepcopy
         # IS backtest
         is_data = _slice_data(data, is_idx)
         engine_is = _make_engine_from_config(cfg)
-        strat_is = copy.deepcopy(strategy)
+        strat_is = _fresh_strategy_from_state()
         res_is = engine_is.run(strat_is, is_data, symbol, timeframe)
 
         # OOS backtest
         oos_data = _slice_data(data, oos_idx)
         engine_oos = _make_engine_from_config(cfg)
-        strat_oos = copy.deepcopy(strategy)
+        strat_oos = _fresh_strategy_from_state()
         res_oos = engine_oos.run(strat_oos, oos_data, symbol, timeframe)
 
         return {
@@ -126,7 +136,6 @@ def _worker_wfa_window(args):
             'error': str(e),
         }
 
-
 def _worker_kfold_path(args):
     """
     Evaluate one Purged K-Fold path.
@@ -134,7 +143,6 @@ def _worker_kfold_path(args):
     """
     fold_id, train_idx, test_idx = args
     state = _VALIDATE_STATE
-    strategy = copy.deepcopy(state['strategy'])
     data = state['data']
     cfg = state['engine_config']
     symbol = state['symbol']
@@ -150,16 +158,17 @@ def _worker_kfold_path(args):
         return sliced
 
     try:
+        # FIX: Use fresh strategy instances instead of deepcopy
         # Train backtest
         train_data = _slice_data(data, train_idx)
         engine_train = _make_engine_from_config(cfg)
-        strat_train = copy.deepcopy(strategy)
+        strat_train = _fresh_strategy_from_state()
         res_train = engine_train.run(strat_train, train_data, symbol, timeframe)
 
         # Test backtest
         test_data = _slice_data(data, test_idx)
         engine_test = _make_engine_from_config(cfg)
-        strat_test = copy.deepcopy(strategy)
+        strat_test = _fresh_strategy_from_state()
         res_test = engine_test.run(strat_test, test_data, symbol, timeframe)
 
         return {
@@ -188,13 +197,15 @@ def _worker_mc_permutation(args):
     """
     perm_id, seed = args
     state = _VALIDATE_STATE
-    strategy = copy.deepcopy(state['strategy'])
     data = state['data']
     cfg = state['engine_config']
     symbol = state['symbol']
     timeframe = state['timeframe']
 
     try:
+        # FIX: Use fresh strategy instance instead of deepcopy
+        strategy = _fresh_strategy_from_state()
+
         # Run base backtest
         engine = _make_engine_from_config(cfg)
         result = engine.run(strategy, data, symbol, timeframe)
@@ -220,6 +231,7 @@ def _worker_mc_permutation(args):
         }
     except Exception as e:
         return {'perm_id': perm_id, 'sharpe': 0.0, 'error': str(e)}
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -370,8 +382,11 @@ class ParallelAntiOverfitPipeline(AntiOverfitPipeline):
 
         try:
             engine = engine_factory()
-            strat = copy.deepcopy(strategy)
+            strategy_class = type(strategy)
+            strat = strategy_class()
+            strat.set_params(strategy.params)
             base_result = engine.run(strat, data, symbol, timeframe)
+
             n_backtests += 1
 
             from optimize.deflated_sharpe import compute_dsr_from_backtest
