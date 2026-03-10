@@ -298,7 +298,7 @@ class BacktestEngine:
     def _open_position(self, signal: Signal, bar: dict, bar_idx: int):
         """Open a new position from a signal."""
         # Calculate position size
-        risk_capital = self._capital * 0.03  # 2% risk per trade
+        risk_capital = self._capital * 0.03  # 3% risk per trade
 
         # Commission on entry
         size = risk_capital * signal.leverage
@@ -783,6 +783,9 @@ class BacktestEngine:
                 data['timestamp'][0] / 1000).strftime('%Y-%m-%d')
             end_date = datetime.fromtimestamp(
                 data['timestamp'][-1] / 1000).strftime('%Y-%m-%d')
+
+        # Calmar ratio = annualized return / max drawdown
+        calmar = annual_return / max_dd if max_dd > 0 else 0.0
 
         return BacktestResult(
             trades=trades,

@@ -54,16 +54,40 @@ def _setup_validate_workers(strategy, data, engine_config,
 
 
 def _make_engine_from_config(cfg):
-    """Reconstruct a BacktestEngine from serializable config dict."""
-    from core.engine import BacktestEngine
-    engine = BacktestEngine(
-        initial_capital=cfg.get('capital', 10000),
-        market_config=cfg.get('market_config'),
-    )
+    """
+    Reconstruct a BacktestEngine from serializable config dict.
+    Respects no_intrabar flag for engine type consistency.
+    """
     dd = cfg.get('detail_data')
     dtf = cfg.get('detail_tf')
-    if dd is not None and dtf is not None:
-        engine.set_detail_data(dd, dtf)
+    no_intrabar = cfg.get('no_intrabar', False)
+    capital = cfg.get('capital', 1000)       # FIX: era 10000
+    market_config = cfg.get('market_config')
+
+    engine = None
+
+    # Try IntrabarBacktestEngine when appropriate
+    if dd is not None and dtf is not None and not no_intrabar:
+        try:
+            from core.engine_intrabar import IntrabarBacktestEngine
+            engine = IntrabarBacktestEngine(
+                initial_capital=capital,
+                market_config=market_config,
+            )
+            engine.set_detail_data(dd, dtf)
+        except ImportError:
+            engine = None
+
+    # Fallback to standard BacktestEngine
+    if engine is None:
+        from core.engine import BacktestEngine
+        engine = BacktestEngine(
+            initial_capital=capital,
+            market_config=market_config,
+        )
+        if dd is not None and dtf is not None:
+            engine.set_detail_data(dd, dtf)
+
     return engine
 def _fresh_strategy_from_state():
     """

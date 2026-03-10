@@ -122,7 +122,7 @@ def evaluate_trial(args) -> dict:
         try:
             from core.engine_intrabar import IntrabarBacktestEngine
             engine = IntrabarBacktestEngine(
-                initial_capital=cfg.get('capital', 10000.0),
+                initial_capital=cfg.get('capital', 1000.0),
                 market_config=cfg.get('market_config'),
             )
             engine.set_detail_data(dd, dtf)
@@ -132,7 +132,7 @@ def evaluate_trial(args) -> dict:
     if engine is None:
         from core.engine import BacktestEngine
         engine = BacktestEngine(
-            initial_capital=cfg.get('capital', 10000.0),
+            initial_capital=cfg.get('capital', 1000.0),
             market_config=cfg.get('market_config'),
         )
         if dd is not None and dtf is not None:

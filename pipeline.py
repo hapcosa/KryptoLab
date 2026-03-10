@@ -285,7 +285,9 @@ def run_pipeline(args):
 
             data, detail_info, symbol_out, tf_out = _load_data(load_args, tf)
             market = MarketConfig.detect(symbol)
-            engine_factory = _make_engine_factory(capital, detail_info, market)
+            no_intrabar = args.get('no_intrabar', False)
+            engine_factory = _make_engine_factory(capital, detail_info, market,
+                                                  no_intrabar=no_intrabar)
 
             # ═══════════════════════════════════════════════
             # STEP 3: EVALUATE EACH TRIAL (OOS)

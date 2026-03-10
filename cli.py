@@ -443,7 +443,9 @@ def cmd_validate(args):
 
     # FIX: Engine factory WITH detail data AND market config (antes no se pasaba market)
     market = MarketConfig.detect(symbol)
-    engine_factory = _make_engine_factory(capital, detail_info, market)
+    no_intrabar = args.get('no_intrabar', False)
+    engine_factory = _make_engine_factory(capital, detail_info, market,
+                                          no_intrabar=no_intrabar)
 
     # Build a small param grid for WFA from strategy defaults
     param_grid = _build_validation_grid(strategy)
@@ -734,7 +736,7 @@ def _make_engine_factory(capital, detail_info=None, market_config=None,
 def cmd_optimize(args):
     """Optimization with multiple methods and objectives — with parallel support."""
     strategy_name = args.get('strategy', 'cybercycle')
-    capital = args.get('capital', 10000.0)
+    capital = args.get('capital', 1000.0)
     leverage = args.get('leverage', None)
     objective = args.get('objective', 'sharpe')
     method = args.get('method', 'grid')
@@ -779,12 +781,15 @@ def cmd_optimize(args):
             print(f"   ✅ Optimizing {len(param_subset)} of {len(valid_names)} params")
 
     data, detail_info, symbol, tf = _load_data(args)
+    from data.bitget_client import MarketConfig
+    market = MarketConfig.detect(symbol)  # FIX: agregar market_config
     no_intrabar = args.get('no_intrabar', False)
-    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
+    engine_factory = _make_engine_factory(capital, detail_info, market,
+                                          no_intrabar=no_intrabar)
 
     # ── Parallel setup ──
     n_jobs = _get_n_jobs(args)
-    engine_config = _build_engine_config(capital, detail_info, no_intrabar=no_intrabar)
+    engine_config = _build_engine_config(capital, detail_info,market, no_intrabar=no_intrabar)
 
     method_labels = {
         'grid': 'Grid Search',
@@ -1053,7 +1058,9 @@ def cmd_regime(args):
 
     # FIX: Pasar market_config (antes no se pasaba)
     market = MarketConfig.detect(symbol)
-    engine_factory = _make_engine_factory(capital, detail_info, market)
+    no_intrabar = args.get('no_intrabar', False)
+    engine_factory = _make_engine_factory(capital, detail_info, market,
+                                          no_intrabar=no_intrabar)
 
     from ml.regime_detector import detect_regime, strategy_regime_performance
 
@@ -1124,7 +1131,9 @@ def cmd_targets(args):
 
     # FIX: Create engine with detail data AND market config (antes no se pasaba market)
     market = MarketConfig.detect(symbol)
-    engine = _make_engine_factory(capital, detail_info, market)()
+    no_intrabar = args.get('no_intrabar', False)
+    engine_factory = _make_engine_factory(capital, detail_info, market,
+                                          no_intrabar=no_intrabar)
     result = engine.run(strategy, data, symbol, tf)
 
     from ml.temporal_targets import (
