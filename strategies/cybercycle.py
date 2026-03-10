@@ -113,7 +113,7 @@ class CyberCycleStrategy(IStrategy):
 
             # ── Cycle strength ──────────────────────────────────────
             ParamDef('cycle_str_pctile', 'float', 50.0, 20.0, 80.0, 5.0),
-            ParamDef('cycle_str_lookback', 'int', 50, 20, 100),
+            ParamDef('cycle_str_lookback', 'int', 50, 20, 100,5),
 
             # ── Filters ─────────────────────────────────────────────
             ParamDef('use_trend', 'bool', True),
@@ -130,12 +130,12 @@ class CyberCycleStrategy(IStrategy):
                      options=['slatr_tprr', 'sltp_fixed']),
 
             # ── Risk params: ATR mode (slatr_tprr) ──────────────────
-            ParamDef('leverage', 'float', 7.0, 12.0, 35.0, 1.0),
+            ParamDef('leverage', 'float', 7.0, 8.0, 40.0, 1.0),
             ParamDef('sl_atr_mult', 'float', 2.5, 0.5, 3.0, 0.1),
 
             # TP1 / TP2 — R:R multipliers sobre la distancia al SL
-            ParamDef('tp1_rr', 'float', 2.0, 0.5, 2.5, 0.25),
-            ParamDef('tp1_size', 'float', 0.6, 0.1, 0.9, 0.05),
+            ParamDef('tp1_rr', 'float', 1.5, 0.5, 2.0, 0.25),
+            ParamDef('tp1_size', 'float', 0.6, 0.1, 1.0, 0.05),
             ParamDef('tp2_rr', 'float', 4.0, 1.0, 6.0, 0.25),
 
             # ── Risk params: FIXED mode (sltp_fixed) ────────────────
@@ -145,17 +145,17 @@ class CyberCycleStrategy(IStrategy):
             #      tp2_fixed_pct=4.0 → TP2 a +4.0% del entry
             # ─────────────────────────────────────────────────────────
             ParamDef('sl_fixed_pct', 'float', 2.5, 0.3, 5.0, 0.1),
-            ParamDef('tp1_fixed_pct', 'float', 3.0, 0.5, 8.0, 0.25),
+            ParamDef('tp1_fixed_pct', 'float', 3.0, 0.5, 5.0, 0.25),
             ParamDef('tp1_fixed_size', 'float', 0.7, 0.1, 0.9, 0.05),
-            ParamDef('tp2_fixed_pct', 'float', 4.5, 1.0, 15.0, 0.5),
+            ParamDef('tp2_fixed_pct', 'float', 4.5, 1.0, 10.0, 0.5),
 
             # ── Break-even ──────────────────────────────────────────
-            ParamDef('be_pct', 'float', 0.8, 1.0, 3.0, 0.1),
+            ParamDef('be_pct', 'float', 1.5, 1.0, 5.0, 0.1),
 
             # ── Trailing stop ───────────────────────────────────────
             ParamDef('use_trailing', 'bool', True),
-            ParamDef('trail_activate_pct', 'float', 1.4, 1.0, 5.0, 0.25),
-            ParamDef('trail_pullback_pct', 'float', 0.8, 0.7, 2.5, 0.10),
+            ParamDef('trail_activate_pct', 'float', 2.5, 1.0, 6.0, 0.25),
+            ParamDef('trail_pullback_pct', 'float', 1.2, 0.5, 2.5, 0.10),
         ]
 
     # ─────────────────────────────────────────────────────────────
