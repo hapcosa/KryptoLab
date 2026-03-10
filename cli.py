@@ -413,63 +413,40 @@ def cmd_list_params(args):
 # ═══════════════════════════════════════════════════════════════
 
 def cmd_validate(args):
-    """Run anti-overfitting validation pipeline (Phase 3) — with parallel support."""
+    """Run anti-overfitting validation pipeline (Phase 3)."""
     from core.engine import BacktestEngine
-    from data.bitget_client import DataCache, generate_sample_data
+    from data.bitget_client import DataCache, MarketConfig, generate_sample_data
+    from optimize.anti_overfit import AntiOverfitPipeline
 
     strategy_name = args.get('strategy', 'cybercycle')
     symbol = args.get('symbol', 'BTCUSDT')
     timeframe = args.get('timeframe', '4h')
-    capital = args.get('capital', 10000.0)
-    leverage = args.get('leverage', None)
+    capital = args.get('capital', 1000.0)       # FIX: era 10000.0, ahora igual que cmd_backtest
+    leverage = args.get('leverage', 3.0)         # FIX: era None, ahora default 3.0 como cmd_backtest
 
     strategy = get_strategy(strategy_name)
-    if leverage is not None:
-        strategy.set_params({'leverage': leverage})
 
+    # FIX: Siempre aplicar leverage (igual que cmd_backtest)
+    strategy.set_params({'leverage': leverage})
+
+    # Load params from JSON file
     _load_params_file(args, strategy)
 
     print(f"\n🔬 CryptoLab — Anti-Overfitting Validation")
     print(f"   Strategy: {strategy.name()}")
     print(f"   {symbol} | {timeframe}")
-    if leverage:
-        print(f"   Leverage: {leverage}x")
+    print(f"   Leverage: {leverage}x | Capital: ${capital:,.0f}")
+    print()
 
     # Load data + detail data
     data, detail_info, symbol, timeframe = _load_data(args, timeframe)
 
-    no_intrabar = args.get('no_intrabar', False)
-    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
+    # FIX: Engine factory WITH detail data AND market config (antes no se pasaba market)
+    market = MarketConfig.detect(symbol)
+    engine_factory = _make_engine_factory(capital, detail_info, market)
+
+    # Build a small param grid for WFA from strategy defaults
     param_grid = _build_validation_grid(strategy)
-
-    # ── Parallel setup ──
-    n_jobs = _get_n_jobs(args)
-
-    if n_jobs > 1:
-        try:
-            from optimize.anti_overfit_parallel import ParallelAntiOverfitPipeline
-
-            engine_config = _build_engine_config(capital, detail_info, no_intrabar=no_intrabar)
-            _print_parallel_info(n_jobs)
-            print()
-
-            pipeline = ParallelAntiOverfitPipeline(
-                n_jobs=n_jobs,
-                wfa_windows=4,
-                mc_simulations=1000,
-                fail_fast=False,
-                verbose=True,
-            )
-            result = pipeline.run(strategy, data, engine_factory,
-                                  param_grid, symbol, timeframe,
-                                  engine_config=engine_config)
-            return result
-        except ImportError:
-            print("   ⚠ anti_overfit_parallel.py not found, using sequential")
-
-    # ── Sequential fallback ──
-    print()
-    from optimize.anti_overfit import AntiOverfitPipeline
 
     pipeline = AntiOverfitPipeline(
         wfa_windows=4,
@@ -477,11 +454,11 @@ def cmd_validate(args):
         fail_fast=False,
         verbose=True,
     )
+
     result = pipeline.run(strategy, data, engine_factory,
                           param_grid, symbol, timeframe)
+
     return result
-
-
 def _build_validation_grid(strategy) -> dict:
     """Build a compact param grid for validation from strategy parameter defs."""
     grid = {}
@@ -972,58 +949,62 @@ def cmd_optimize(args):
 
 def cmd_regime(args):
     """Detect market regimes and analyze per-regime performance."""
+    from data.bitget_client import MarketConfig
+
     strategy_name = args.get('strategy', 'cybercycle')
-    capital = args.get('capital', 10000.0)
-    leverage = args.get('leverage', None)
+    capital = args.get('capital', 1000.0)       # FIX: era 10000.0, ahora igual que cmd_backtest
+    leverage = args.get('leverage', 3.0)         # FIX: era None, ahora default 3.0 como cmd_backtest
 
     strategy = get_strategy(strategy_name)
-    if leverage is not None:
-        strategy.set_params({'leverage': leverage})
 
-    # Load params from JSON file
+    # FIX: Siempre aplicar leverage (igual que cmd_backtest)
+    strategy.set_params({'leverage': leverage})
+
+    # Load params from JSON file (puede sobreescribir leverage)
     _load_params_file(args, strategy)
 
+    # Apply any extra params
+    if 'params' in args:
+        strategy.set_params(args['params'])
+
     data, detail_info, symbol, tf = _load_data(args)
-    no_intrabar = args.get('no_intrabar', False)
 
     print(f"\n🔄 CryptoLab — Regime Detection & Analysis")
     print(f"   Strategy: {strategy.name()}")
-    print(f"   {symbol} | {tf}\n")
+    print(f"   {symbol} | {tf}")
+    print(f"   Leverage: {leverage}x | Capital: ${capital:,.0f}")
+    print()
 
-    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
+    # FIX: Pasar market_config (antes no se pasaba)
+    market = MarketConfig.detect(symbol)
+    engine_factory = _make_engine_factory(capital, detail_info, market)
 
-    # ── Try parallel (concurrent detect + backtest) ──
-    try:
-        from optimize.task_parallel import parallel_regime
-        rr, perf = parallel_regime(
-            strategy, data, engine_factory,
-            symbol=symbol, timeframe=tf, verbose=True)
-        return rr, perf
-    except ImportError:
-        pass
-
-    # ── Sequential fallback ──
     from ml.regime_detector import detect_regime, strategy_regime_performance
 
+    # Detect regimes
     rr = detect_regime(data, method='vt', verbose=True)
+
+    # Analyze per-regime performance
     perf = strategy_regime_performance(
         strategy, data, engine_factory, rr,
         symbol=symbol, timeframe=tf, verbose=True)
 
     return rr, perf
 
-
 def cmd_ensemble(args):
     """Run ensemble of all 3 strategies."""
-    capital = args.get('capital', 10000.0)
+    from data.bitget_client import MarketConfig
+
+    capital = args.get('capital', 1000.0)       # FIX: era 10000.0, ahora igual que cmd_backtest
     data, detail_info, symbol, tf = _load_data(args)
-    no_intrabar = args.get('no_intrabar', False)
 
     print(f"\n🎯 CryptoLab — Strategy Ensemble")
     print(f"   Methods: CyberCycle + GaussBands + SmartMoney")
     print(f"   {symbol} | {tf}\n")
 
-    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
+    # FIX: Pasar market_config (antes no se pasaba)
+    market = MarketConfig.detect(symbol)
+    engine_factory = _make_engine_factory(capital, detail_info, market)
 
     from ml.ensemble import EnsembleBuilder
 
@@ -1036,36 +1017,43 @@ def cmd_ensemble(args):
                               symbol=symbol, timeframe=tf, verbose=True)
     return result
 
-
 # ═══════════════════════════════════════════════════════════════
 #  TARGETS — Optimized with pre-computed buckets (~1.2x speedup)
 # ═══════════════════════════════════════════════════════════════
 
 def cmd_targets(args):
     """Evaluate temporal targets for a strategy."""
+    from data.bitget_client import MarketConfig
+
     strategy_name = args.get('strategy', 'cybercycle')
-    capital = args.get('capital', 10000.0)
-    leverage = args.get('leverage', None)
+    capital = args.get('capital', 1000.0)       # FIX: era 10000.0, ahora igual que cmd_backtest
+    leverage = args.get('leverage', 3.0)         # FIX: era None, ahora default 3.0 como cmd_backtest
     target_preset = args.get('targets', 'conservative')
 
     strategy = get_strategy(strategy_name)
-    if leverage is not None:
-        strategy.set_params({'leverage': leverage})
 
+    # FIX: Siempre aplicar leverage (igual que cmd_backtest)
+    strategy.set_params({'leverage': leverage})
+
+    # Load params from JSON file
     _load_params_file(args, strategy)
 
     data, detail_info, symbol, tf = _load_data(args)
-    no_intrabar = args.get('no_intrabar', False)
 
     print(f"\n📅 CryptoLab — Temporal Target Analysis")
     print(f"   Strategy: {strategy.name()}")
     print(f"   {symbol} | {tf}")
+    print(f"   Leverage: {leverage}x | Capital: ${capital:,.0f}")
     print(f"   Targets: {target_preset}\n")
 
-    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
+    # FIX: Create engine with detail data AND market config (antes no se pasaba market)
+    market = MarketConfig.detect(symbol)
+    engine = _make_engine_factory(capital, detail_info, market)()
+    result = engine.run(strategy, data, symbol, tf)
 
     from ml.temporal_targets import (
-        CONSERVATIVE_TARGETS, AGGRESSIVE_TARGETS, CONSISTENCY_TARGETS,
+        evaluate_targets, CONSERVATIVE_TARGETS,
+        AGGRESSIVE_TARGETS, CONSISTENCY_TARGETS,
     )
 
     targets_map = {
@@ -1079,69 +1067,136 @@ def cmd_targets(args):
         print(f"   ⚠️  Unknown preset '{target_preset}', using conservative")
         print(f"      Options: conservative, aggressive, consistency\n")
 
-    # ── Try optimized version (pre-computed buckets) ──
-    try:
-        from optimize.task_parallel import parallel_targets
-        tt_result = parallel_targets(
-            strategy, data, engine_factory,
-            symbol=symbol, timeframe=tf,
-            target_specs=targets, capital=capital, verbose=True)
-        return tt_result
-    except ImportError:
-        pass
-
-    # ── Sequential fallback ──
-    from ml.temporal_targets import evaluate_targets
-
-    engine = engine_factory()
-    result = engine.run(strategy, data, symbol, tf)
-
     tt_result = evaluate_targets(
         targets, result.trades,
         data.get('timestamp', np.arange(len(data['close']))),
         result.equity_curve, initial_capital=capital, verbose=True)
 
     return tt_result
-
+# ═══════════════════════════════════════════════════════════════
+# cmd_combinatorial() — CORREGIDA
+# Soporta --params-file, --leverage, MarketConfig
+# Reemplazar la funcion completa en cli.py
+# ═══════════════════════════════════════════════════════════════
 
 def cmd_combinatorial(args):
-    """Search for optimal strategy combinations."""
-    capital = args.get('capital', 10000.0)
+    """
+    Search for optimal strategy combinations (portfolio).
+
+    Now supports:
+    - --params-file to apply optimized params to the primary strategy
+    - --leverage to set leverage for all strategies
+    - MarketConfig detection for consistent fees
+    - Dynamic config generation: primary strategy with optimized params
+      + default variants of other strategies
+    """
+    from data.bitget_client import MarketConfig
+
+    strategy_name = args.get('strategy', 'cybercycle')
+    capital = args.get('capital', 1000.0)
+    leverage = args.get('leverage', 3.0)
+
     data, detail_info, symbol, tf = _load_data(args)
-    no_intrabar = args.get('no_intrabar', False)
+
+    # Market config
+    market = MarketConfig.detect(symbol)
+    engine_factory = _make_engine_factory(capital, detail_info, market)
 
     print(f"\n🧬 CryptoLab — Combinatorial Strategy Search")
-    print(f"   {symbol} | {tf}\n")
-
-    engine_factory = _make_engine_factory(capital, detail_info, no_intrabar=no_intrabar)
+    print(f"   {symbol} | {tf}")
+    print(f"   Leverage: {leverage}x | Capital: ${capital:,.0f}")
 
     from ml.combinatorial import CombinatorialSearch, StrategyConfig
 
-    cc = get_strategy('cybercycle')
-    gb = get_strategy('gaussbands')
-    smc = get_strategy('smartmoney')
+    # ── Build configs dynamically ──
+    configs = []
 
-    configs = [
-        StrategyConfig('CC-mama', cc, {'alpha_method': 'mama', 'confidence_min': 70}),
-        StrategyConfig('CC-homo', cc, {'alpha_method': 'homodyne', 'confidence_min': 60}),
-        StrategyConfig('GB-default', gb, {}),
-        StrategyConfig('SMC-default', smc, {}),
-    ]
+    # Primary strategy with optimized params (if --params-file provided)
+    primary = get_strategy(strategy_name)
+    primary.set_params({'leverage': leverage})
+
+    params_file = args.get('params_file')
+    has_optimized = False
+    if params_file:
+        has_optimized = _load_params_file(args, primary)
+
+    # Always include the primary strategy with its (possibly optimized) params
+    primary_params = copy.deepcopy(primary.params)
+    configs.append(StrategyConfig(
+        f'{strategy_name.upper()}-optimized' if has_optimized else f'{strategy_name.upper()}-default',
+        get_strategy(strategy_name),
+        primary_params,
+    ))
+
+    # If --params-file has top_trials, add top 3 variants of the primary strategy
+    if params_file and has_optimized:
+        try:
+            with open(Path(params_file)) as f:
+                loaded = json.load(f)
+            top_trials = loaded.get('top_trials', loaded.get('top_5', []))
+
+            # Add trial #2 and #3 as variants (trial #1 is already the primary)
+            for t_idx, trial in enumerate(top_trials[1:3], start=2):
+                t_params = trial.get('params', {})
+                t_params['leverage'] = leverage  # Ensure same leverage
+                t_metrics = trial.get('metrics', trial)
+                label = (f"{strategy_name.upper()}-t{t_idx} "
+                         f"(SR={t_metrics.get('sharpe',0):.1f})")
+                configs.append(StrategyConfig(
+                    label,
+                    get_strategy(strategy_name),
+                    t_params,
+                ))
+        except Exception:
+            pass
+
+    # Add other strategies with defaults
+    all_strategies = ['cybercycle', 'gaussbands', 'smartmoney']
+    for other_name in all_strategies:
+        if other_name == strategy_name.lower():
+            continue  # Skip if it's the primary (already added above)
+        try:
+            other = get_strategy(other_name)
+            other_params = {'leverage': leverage}
+            configs.append(StrategyConfig(
+                other_name.upper(),
+                other,
+                other_params,
+            ))
+        except Exception:
+            pass
+
+    # If we have CyberCycle, add a variant with a different alpha_method
+    if strategy_name.lower() != 'cybercycle':
+        try:
+            cc_alt = get_strategy('cybercycle')
+            configs.append(StrategyConfig(
+                'CC-mama',
+                cc_alt,
+                {'alpha_method': 'mama', 'leverage': leverage},
+            ))
+        except Exception:
+            pass
+
+    print(f"   Configs: {len(configs)}")
+    for i, c in enumerate(configs):
+        print(f"     [{i}] {c.name}")
+    print()
 
     cs = CombinatorialSearch(max_portfolio_size=3, verbose=True)
     result = cs.run(configs, data, engine_factory, symbol, tf)
 
-    print(f"\n{'─' * 50}")
+    print(f"\n{'─' * 60}")
     print(f"Top 5 Portfolios:")
     for i, p in enumerate(result.portfolios[:5]):
         names = [c.name for c in p.configs]
+        weights = [f"{w:.0%}" for w in p.weights]
         print(f"  #{i + 1}: {' + '.join(names)}")
+        print(f"       Weights: {weights}")
         print(f"       SR={p.combined_sharpe:.2f} Ret={p.combined_return:+.1f}% "
               f"DD={p.combined_max_dd:.1f}% Synergy={p.synergy_score:+.2f}")
 
     return result
-
-
 # ═══════════════════════════════════════════════════════════════
 #  DOWNLOAD — Parallel batch (3-5x speedup with asyncio.gather)
 # ═══════════════════════════════════════════════════════════════

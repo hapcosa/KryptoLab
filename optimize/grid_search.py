@@ -461,15 +461,74 @@ def objective_weekly_robust(result) -> float:
     return score
 
 
+def check_liquidation_safety(result, max_leverage_sl_pct: float = 85.0) -> bool:
+    """
+    Verify no trade has leverage × SL_distance exceeding liquidation threshold.
+
+    In perpetual futures, liquidation occurs at approximately:
+        price_move% ≈ 100% / leverage  (simplified, ignoring maintenance margin)
+
+    If leverage × sl_distance_pct >= 85%, the position is dangerously close
+    to liquidation and the SL may not protect you (slippage, gaps, etc.)
+
+    Args:
+        result: BacktestResult with trades and params
+        max_leverage_sl_pct: Maximum allowed leverage × sl_distance_pct
+
+    Returns:
+        True if all trades are safe, False if any trade exceeds threshold
+    """
+    if not hasattr(result, 'trades') or not result.trades:
+        return True
+
+    for trade in result.trades:
+        # Any actual liquidation = immediate fail
+        if trade.exit_reason == 'liquidation':
+            return False
+
+        # Check SL trades for proximity to liquidation
+        if trade.exit_reason == 'SL':
+            if trade.entry_price <= 0:
+                continue
+
+            # Calculate actual price movement at SL
+            if trade.direction == 1:  # LONG
+                sl_distance_pct = abs(trade.entry_price - trade.exit_price) / trade.entry_price * 100
+            else:  # SHORT
+                sl_distance_pct = abs(trade.exit_price - trade.entry_price) / trade.entry_price * 100
+
+            effective_risk = trade.leverage * sl_distance_pct
+            if effective_risk > max_leverage_sl_pct:
+                return False
+
+    return True
+
+
+def apply_liquidation_gate(objective_fn):
+    """
+    Decorator: wraps any objective function with liquidation safety check.
+    Returns -999.0 (rejection) if any trade exceeds liquidation threshold.
+    """
+
+    def wrapped(result) -> float:
+        if not check_liquidation_safety(result, max_leverage_sl_pct=85.0):
+            return -999.0
+        return objective_fn(result)
+
+    wrapped.__name__ = objective_fn.__name__
+    wrapped.__doc__ = objective_fn.__doc__
+    return wrapped
+
+
 OBJECTIVES = {
-    'sharpe': objective_sharpe,
-    'return': objective_return,
-    'calmar': objective_calmar,
-    'composite': objective_composite,
-    'monthly': objective_monthly,
-    'monthly_robust': objective_monthly_robust,
-    'weekly': objective_weekly,
-    'weekly_robust': objective_weekly_robust,
+    'sharpe': apply_liquidation_gate(objective_sharpe),
+    'return': apply_liquidation_gate(objective_return),
+    'calmar': apply_liquidation_gate(objective_calmar),
+    'composite': apply_liquidation_gate(objective_composite),
+    'monthly': apply_liquidation_gate(objective_monthly),
+    'monthly_robust': apply_liquidation_gate(objective_monthly_robust),
+    'weekly': apply_liquidation_gate(objective_weekly),
+    'weekly_robust': apply_liquidation_gate(objective_weekly_robust),
 }
 
 
