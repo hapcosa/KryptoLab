@@ -73,13 +73,13 @@ class RegimeResult:
 #  METHOD A: Volatility-Trend Classification (Rule-Based)
 # ═══════════════════════════════════════════════════════════════
 
-def classify_vt(close: np.ndarray, high: np.ndarray, low: np.ndarray,
+def classify_vt(close, high, low,
                 trend_period: int = 50,
                 vol_period: int = 20,
                 vol_lookback: int = 100,
                 trend_threshold: float = 0.002,
                 vol_percentile: float = 70.0
-                ) -> RegimeResult:
+                ):
     """
     Volatility-Trend regime classification (rule-based).
 
@@ -87,6 +87,7 @@ def classify_vt(close: np.ndarray, high: np.ndarray, low: np.ndarray,
       1. Trend = sign of EMA slope (EMA(close, trend_period))
       2. Volatility = ATR(vol_period) / close
       3. High-vol = normalized ATR > percentile threshold
+      4. Trend threshold is ADAPTIVE to asset volatility
 
     Regime assignment:
       - High-vol + Up slope   → HIGH_VOL_UP
@@ -95,6 +96,9 @@ def classify_vt(close: np.ndarray, high: np.ndarray, low: np.ndarray,
       - Low-vol + Down slope  → TREND_DOWN
       - Low-vol + Flat slope  → RANGING
     """
+    import numpy as np
+    from indicators.common import ema, atr
+
     n = len(close)
     labels = np.full(n, Regime.RANGING, dtype=int)
 
@@ -122,11 +126,17 @@ def classify_vt(close: np.ndarray, high: np.ndarray, low: np.ndarray,
     if vol_lookback < n:
         vol_threshold[:vol_lookback] = vol_threshold[vol_lookback]
 
+    # ── FIX: Adaptive trend threshold ──
+    # The fixed 0.002 is too low for crypto (ETH, BTC have higher slopes).
+    # Scale by median normalized volatility so the classifier auto-adapts.
+    median_vol = np.median(norm_vol[vol_lookback:]) if vol_lookback < n else np.median(norm_vol)
+    adaptive_threshold = max(trend_threshold, median_vol * 0.4)
+
     # Classify
     for i in range(n):
         is_high_vol = norm_vol[i] > vol_threshold[i]
-        is_up = slope_smooth[i] > trend_threshold
-        is_down = slope_smooth[i] < -trend_threshold
+        is_up = slope_smooth[i] > adaptive_threshold
+        is_down = slope_smooth[i] < -adaptive_threshold
 
         if is_high_vol:
             labels[i] = Regime.HIGH_VOL_UP if is_up else (
@@ -145,6 +155,7 @@ def classify_vt(close: np.ndarray, high: np.ndarray, low: np.ndarray,
         'slope': slope_smooth,
         'norm_vol': norm_vol,
         'vol_threshold': vol_threshold,
+        'adaptive_threshold': adaptive_threshold,  # NEW: for debugging
     }
 
     segments = _build_segments(labels, close)
@@ -157,7 +168,6 @@ def classify_vt(close: np.ndarray, high: np.ndarray, low: np.ndarray,
         method='volatility_trend',
         features=features,
     )
-
 
 # ═══════════════════════════════════════════════════════════════
 #  METHOD B: Rolling Feature Clustering (KMeans)
@@ -390,18 +400,17 @@ def detect_regime(data: dict,
 
 
 def strategy_regime_performance(strategy,
-                                data: dict,
-                                engine_factory: Callable = None,
-                                regime_result: RegimeResult = None,
-                                symbol: str = "",
-                                timeframe: str = "",
-                                verbose: bool = True) -> Dict[int, Dict[str, float]]:
+                                data,
+                                engine_factory=None,
+                                regime_result=None,
+                                symbol="",
+                                timeframe="",
+                                verbose=True):
     """
     Analyze strategy performance broken down by regime.
-
-    Returns dict[regime_id → {sharpe, return, win_rate, n_trades}]
+    Returns dict[regime_id -> {sharpe, return, win_rate, n_trades}]
     """
-    import copy
+    import numpy as np
     from core.engine import BacktestEngine
 
     if regime_result is None:
@@ -409,12 +418,21 @@ def strategy_regime_performance(strategy,
 
     if engine_factory is None:
         def engine_factory():
-            return BacktestEngine(initial_capital=10000)
+            return BacktestEngine(initial_capital=1000)
 
-    # Run full backtest
-    strat = copy.deepcopy(strategy)
+    # ── FIX: Do NOT use copy.deepcopy(strategy) ──
+    # deepcopy breaks complex strategy objects (Ehlers filters, numpy state).
+    # Instead, create a FRESH instance and apply params explicitly.
+    strategy_class = type(strategy)
+    strat = strategy_class()
+    strat.set_params(strategy.params)
+
     engine = engine_factory()
     result = engine.run(strat, data, symbol, timeframe)
+
+    if verbose:
+        print(f"    (internal backtest: {len(result.trades)} trades, "
+              f"SR={result.sharpe_ratio:.2f}, Ret={result.total_return:+.1f}%)")
 
     # Assign each trade to a regime based on entry bar
     labels = regime_result.labels
@@ -451,7 +469,7 @@ def strategy_regime_performance(strategy,
         }
 
     if verbose:
-        print(f"\n  Strategy Performance by Regime")
+        print(f"\n  Strategy Performance by Regime ({regime_result.method})")
         print(f"  {'─' * 55}")
         print(f"  {'Regime':15s} {'Trades':>7} {'WR':>7} {'PnL':>10} {'SR':>7}")
         for rid in [1, 2, 3, 4, 5]:

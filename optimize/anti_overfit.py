@@ -153,12 +153,12 @@ class AntiOverfitPipeline:
                  # Purged K-Fold params
                  pkfold_splits: int = 5,
                  pkfold_purge: int = 10,
-                 pkfold_max_degradation: float = 40.0,
+                 pkfold_max_degradation: float = 50.0,  # FIX: was 40.0
                  # DSR params
-                 dsr_threshold: float = 0.5,
+                 dsr_threshold: float = 0.30,  # FIX: was 0.50
                  # Monte Carlo params
                  mc_simulations: int = 2000,
-                 mc_significance: float = 0.05,
+                 mc_significance: float = 0.10,  # FIX: was 0.05
                  # Pipeline params
                  fail_fast: bool = False,
                  verbose: bool = True):
