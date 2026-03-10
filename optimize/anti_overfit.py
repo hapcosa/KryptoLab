@@ -325,7 +325,7 @@ class AntiOverfitPipeline:
         strat_full = strategy_class()
         strat_full.set_params(strategy.params)
         if best_params:
-            strat_full.set_params(best_params
+            strat_full.set_params(best_params)
         engine_full = engine_factory()
         full_result = engine_full.run(strat_full, data, symbol, timeframe)
         n_backtests += 1
