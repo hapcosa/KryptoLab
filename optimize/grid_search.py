@@ -568,9 +568,12 @@ def apply_liquidation_gate(objective_fn):
 
     def wrapped(result) -> float:
         if not check_liquidation_safety(result, max_leverage_sl_pct=85.0):
+            result._rejection_reason = "LIQUIDATION_GATE"
             return -999.0
-        return objective_fn(result)
-
+        score = objective_fn(result)
+        if score <= -999.0 and not hasattr(result, "_rejection_reason"):
+            result._rejection_reason = f"OBJECTIVE_{objective_fn.__name__}"
+        return score
     wrapped.__name__ = objective_fn.__name__
     wrapped.__doc__ = objective_fn.__doc__
     return wrapped

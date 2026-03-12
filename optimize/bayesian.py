@@ -35,6 +35,33 @@ from optimize.param_dependencies import (
 )
 
 
+def _liquidation_detail(result) -> str:
+    """Return a short string explaining which trade triggered the liquidation gate."""
+    if not hasattr(result, 'trades') or not result.trades:
+        return "no trades"
+    liq_trades = [t for t in result.trades if getattr(t, 'exit_reason', '') == 'liquidation']
+    if liq_trades:
+        return f"{len(liq_trades)} liquidation(s) found"
+    # Check SL trades near liquidation
+    worst = None
+    worst_risk = 0.0
+    for t in result.trades:
+        if getattr(t, 'exit_reason', '') == 'SL' and getattr(t, 'entry_price', 0) > 0:
+            if t.direction == 1:
+                sl_dist = abs(t.entry_price - t.exit_price) / t.entry_price * 100
+            else:
+                sl_dist = abs(t.exit_price - t.entry_price) / t.entry_price * 100
+            risk = getattr(t, 'leverage', 1) * sl_dist
+            if risk > worst_risk:
+                worst_risk = risk
+                worst = t
+    if worst:
+        lev = getattr(worst, 'leverage', '?')
+        return (f"SL too close to liquidation: "
+                f"leverage={lev}x × sl_dist={worst_risk/lev:.1f}% = {worst_risk:.0f}% > 85%")
+    return "unknown"
+
+
 @dataclass
 class BayesianTrial:
     """Result of a single Optuna trial."""
@@ -321,10 +348,17 @@ class BayesianOptimizer:
             # Debug: show rejection reason for -999 trials (only when verbose)
             if obj_val <= -999.0 and self.verbose:
                 try:
-                    from optimize.grid_search import diagnose_rejection
-                    reason = diagnose_rejection(result)
-                    if not reason.startswith('PASS'):
-                        print(f"         ⚠️  Rejected: {reason}")
+                    # First check if gate already tagged the reason
+                    reason = getattr(result, '_rejection_reason', None)
+                    if reason == 'LIQUIDATION_GATE':
+                        # Get detail: which trade triggered it
+                        detail = _liquidation_detail(result)
+                        print(f"         ⚠️  Rejected: LIQUIDATION — {detail}")
+                    else:
+                        from optimize.grid_search import diagnose_rejection
+                        reason = diagnose_rejection(result)
+                        if not reason.startswith('PASS'):
+                            print(f"         ⚠️  Rejected: {reason}")
                 except Exception:
                     pass
 
