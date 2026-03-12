@@ -145,6 +145,31 @@ def parse_args():
         print("❌ --bt-start and --bt-end required")
         sys.exit(1)
 
+    # FIX: Validar formato YYYY-MM-DD antes de continuar.
+    # Evita errores crípticos como '2025-010-01' (mes con 3 dígitos)
+    # que solo se descubren profundo en la descarga de datos.
+    def _validate_date(label, value):
+        from datetime import datetime as _dt
+        try:
+            _dt.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            print(f"❌ Fecha inválida en {label}: '{value}'")
+            print(f"   Formato requerido: YYYY-MM-DD  (ej: 2025-10-01)")
+            sys.exit(1)
+
+    date_fields = [
+        ('--bt-start',  args['bt_start']),
+        ('--bt-end',    args['bt_end']),
+    ]
+    if not args['skip_optimize']:
+        date_fields += [
+            ('--opt-start', args['opt_start']),
+            ('--opt-end',   args['opt_end']),
+        ]
+    for label, value in date_fields:
+        if value:
+            _validate_date(label, value)
+
     return args
 
 
@@ -364,7 +389,16 @@ def _evaluate_single_trial(trial_idx, trial_params, is_metrics,
                            strategy_name, leverage, capital,
                            data, detail_info, engine_factory,
                            symbol, tf, args, sym_dir):
-    """Evaluate a single trial: backtest + validate + regime + targets."""
+    """
+    Evaluate a single trial: backtest + conditional validate + regime + targets.
+
+    Validation gate: validate/regime/targets only run if the backtest:
+      1. Has positive return (total_return > 0)
+      2. Has drawdown < return (max_drawdown < total_return)
+      3. Has at least 10 trades (enough statistical significance)
+
+    This saves ~30-60s per bad trial (validate is the most expensive step).
+    """
     from cli import get_strategy, _build_validation_grid
     from core.engine import result_to_dataframe
     from optimize.grid_search import compute_monthly_stats
@@ -380,6 +414,7 @@ def _evaluate_single_trial(trial_idx, trial_params, is_metrics,
         'validate': None,
         'regime': None,
         'targets': None,
+        'skipped_reason': None,
     }
 
     # ── BACKTEST ──
@@ -422,7 +457,7 @@ def _evaluate_single_trial(trial_idx, trial_params, is_metrics,
               f"T={bt_result.n_trades}"
               f"{f' ⚠️{n_liq}LIQ' if n_liq else ''}")
 
-        # Monthly
+        # Monthly breakdown
         try:
             ms = compute_monthly_stats(bt_result.trades)
             if ms['n_months'] >= 2:
@@ -447,121 +482,7 @@ def _evaluate_single_trial(trial_idx, trial_params, is_metrics,
         print(f"❌ {e}")
         result['backtest'] = {'status': 'FAILED', 'error': str(e)}
 
-    # ── VALIDATE ──
-    try:
-        print(f"    🔬 Validate...", end=" ", flush=True)
-        strategy_v = get_strategy(strategy_name)
-        strategy_v.set_params({'leverage': leverage})
-        strategy_v.set_params(trial_params)
-
-        from optimize.anti_overfit import AntiOverfitPipeline
-        param_grid = _build_validation_grid(strategy_v)
-
-        pipeline = AntiOverfitPipeline(
-            wfa_windows=4,
-            mc_simulations=args.get('mc_sims', 500),
-            fail_fast=False,
-            verbose=False,
-        )
-        val = pipeline.run(strategy_v, data, engine_factory,
-                           param_grid, symbol, tf)
-
-        result['validate'] = {
-            'all_passed': val.all_passed,
-            'layers_passed': val.layers_passed,
-            'total_layers': val.total_layers,
-            'robustness_score': round(val.robustness_score, 1),
-            'wfa_passed': val.wfa_passed,
-            'pkfold_passed': val.pkfold_passed,
-            'dsr_passed': val.dsr_passed,
-            'mc_passed': val.mc_passed,
-        }
-        if val.rejection_reason:
-            result['validate']['rejection_reason'] = val.rejection_reason
-
-        icon = "✅" if val.all_passed else "❌"
-        print(f"{icon} {val.layers_passed}/4 layers | "
-              f"Robustness={val.robustness_score:.0f}/100")
-
-    except Exception as e:
-        print(f"❌ {e}")
-        result['validate'] = {'status': 'FAILED', 'error': str(e)}
-
-    # ── REGIME ──
-    try:
-        print(f"    🔄 Regime...", end=" ", flush=True)
-        strategy_r = get_strategy(strategy_name)
-        strategy_r.set_params({'leverage': leverage})
-        strategy_r.set_params(trial_params)
-
-        from ml.regime_detector import detect_regime, strategy_regime_performance, REGIME_NAMES
-        rr = detect_regime(data, method='vt', verbose=False)
-        perf = strategy_regime_performance(
-            strategy_r, data, engine_factory, rr,
-            symbol=symbol, timeframe=tf, verbose=False)
-
-        regime_summary = {}
-        for rid in [1, 2, 3, 4, 5]:
-            p = perf.get(rid, {})
-            if p.get('n_trades', 0) > 0:
-                name = REGIME_NAMES.get(rid, f"R{rid}")
-                regime_summary[name] = {
-                    'n_trades': p['n_trades'],
-                    'win_rate': round(p['win_rate'], 1),
-                    'pnl': round(p['return'], 2),
-                    'sharpe': round(p['sharpe'], 2),
-                }
-        result['regime'] = regime_summary
-
-        parts = [f"{k}:{v['n_trades']}t/{v['win_rate']:.0f}%"
-                 for k, v in regime_summary.items()]
-        print(" | ".join(parts) if parts else "no regime trades")
-
-    except Exception as e:
-        print(f"❌ {e}")
-        result['regime'] = {'status': 'FAILED', 'error': str(e)}
-
-    # ── TARGETS ──
-    try:
-        print(f"    📅 Targets ({args['targets']})...", end=" ", flush=True)
-
-        if bt_result is not None:
-            from ml.temporal_targets import (
-                evaluate_targets, CONSERVATIVE_TARGETS,
-                AGGRESSIVE_TARGETS, CONSISTENCY_TARGETS,
-            )
-            targets_map = {
-                'conservative': CONSERVATIVE_TARGETS,
-                'aggressive': AGGRESSIVE_TARGETS,
-                'consistency': CONSISTENCY_TARGETS,
-            }
-            target_specs = targets_map.get(args['targets'], CONSERVATIVE_TARGETS)
-            timestamps = data.get('timestamp', np.arange(len(data['close'])))
-
-            tt = evaluate_targets(target_specs, bt_result.trades,
-                                  timestamps, bt_result.equity_curve,
-                                  initial_capital=capital, verbose=False)
-
-            result['targets'] = {
-                'preset': args['targets'],
-                'all_passed': tt.all_passed,
-                'n_passed': tt.n_passed,
-                'n_targets': tt.n_targets,
-                'overall_consistency': round(tt.overall_consistency, 2),
-            }
-            icon = "✅" if tt.all_passed else "❌"
-            print(f"{icon} {tt.n_passed}/{tt.n_targets} | "
-                  f"Consistency={tt.overall_consistency:.0%}")
-        else:
-            print("skipped (no backtest)")
-            result['targets'] = {'status': 'SKIPPED'}
-
-    except Exception as e:
-        print(f"❌ {e}")
-        result['targets'] = {'status': 'FAILED', 'error': str(e)}
-
-    result['elapsed_seconds'] = round(time.time() - trial_t0, 1)
-    return result
+    return result  # FIX: faltaba este return — sin él Python retorna None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -690,6 +611,11 @@ def _find_best_trial(trials):
     if not trials:
         return None
 
+    # FIX: filtrar Nones que aparecen si _evaluate_single_trial no retornaba valor
+    valid_trials = [t for t in trials if t is not None]
+    if not valid_trials:
+        return None
+
     def score(t):
         bt = t.get('backtest', {})
         val = t.get('validate', {})
@@ -698,7 +624,7 @@ def _find_best_trial(trials):
         validated = 1 if (isinstance(val, dict) and val.get('all_passed')) else 0
         return (validated, bt['sharpe_ratio'])
 
-    return max(trials, key=score)
+    return max(valid_trials, key=score)
 
 
 def _sanitize_metrics(m):

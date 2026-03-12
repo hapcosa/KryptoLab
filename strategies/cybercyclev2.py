@@ -7,12 +7,13 @@ Ehlers Adaptive CyberCycle with:
 - iTrend filter
 - Fisher Transform
 - Volume filter
-- HTF 4H filter
 - Confidence scoring system (0-100)
 
 Diferencia con v7 (cybercycle.py):
 - No usa cycle_strength
-- Nombre: "CyberCycle v6.2" vs v7 "CyberCycle v6.3"
+- Sin HTF filter (eliminado v6.2 → v6.3)
+- Soporta sltp_type: 'slatr_tprr' | 'sltp_fixed'
+- Nombre: "CyberCycle v6.3"
 """
 import numpy as np
 from typing import Optional, List, Dict, Any
@@ -26,10 +27,57 @@ from indicators.ehlers import (
 from indicators.common import ema, sma, atr, crossover, crossunder, volume_ratio
 
 
+# ═══════════════════════════════════════════════════════════════
+#  CONFIDENCE v6.3 — sin HTF, sin cycle_strength
+# ═══════════════════════════════════════════════════════════════
+
+def compute_confidence_v62(
+    is_buy: bool,
+    bull_cross: bool, bear_cross: bool,
+    bull_trend: bool, bear_trend: bool,
+    in_ob: bool, in_os: bool,
+    volume_ok: bool,
+    fish_rising: bool, fish_falling: bool,
+    momentum_positive: bool, momentum_negative: bool,
+    use_trend: bool, use_vol: bool,
+) -> float:
+    """
+    Confidence scoring v6.3 — sin HTF, sin cycle_strength.
+
+    Redistribución de los 15 pts del HTF eliminado:
+        Cross signal:    20  — señal base (cycle × trigger cruce)
+        iTrend:          25  — alineación de tendencia  (+5 vs v6.2)
+        OB/OS zone:      20  — zona de sobreventa/sobrecompra (+5 vs v6.2)
+        Volume:          15  — confirmación de volumen
+        Fisher:          10  — dirección Fisher transform
+        Momentum:        10  — momentum 3 barras del ciclo
+        ──────────────────────
+        Total max:      100
+    """
+    conf = 0.0
+
+    if is_buy:
+        conf += 20.0 if bull_cross else 0.0
+        conf += 25.0 if (bull_trend if use_trend else True) else 0.0
+        conf += 20.0 if in_os else 0.0
+        conf += 15.0 if (volume_ok if use_vol else True) else 0.0
+        conf += 10.0 if fish_rising else 0.0
+        conf += 10.0 if momentum_positive else 0.0
+    else:
+        conf += 20.0 if bear_cross else 0.0
+        conf += 25.0 if (bear_trend if use_trend else True) else 0.0
+        conf += 20.0 if in_ob else 0.0
+        conf += 15.0 if (volume_ok if use_vol else True) else 0.0
+        conf += 10.0 if fish_falling else 0.0
+        conf += 10.0 if momentum_negative else 0.0
+
+    return min(conf, 100.0)
+
+
 class CyberCycleStrategyv2(IStrategy):
 
     def name(self) -> str:
-        return "CyberCycle v6.2"
+        return "CyberCycle v6.3"
 
     def parameter_defs(self) -> List[ParamDef]:
         return [
@@ -38,8 +86,6 @@ class CyberCycleStrategyv2(IStrategy):
                      options=['kalman', 'manual']),
             ParamDef('manual_alpha', 'float', 0.35, 0.05, 0.80, 0.01),
             ParamDef('alpha_floor', 'float', 0.0, 0.0, 0.50, 0.01),
-
-
 
             # Kalman params
             ParamDef('kal_process_noise', 'float', 0.01, 0.001, 0.2, 0.005),
@@ -51,42 +97,62 @@ class CyberCycleStrategyv2(IStrategy):
             # Signal params
             ParamDef('itrend_alpha', 'float', 0.07, 0.01, 0.30, 0.01),
             ParamDef('trigger_ema', 'int', 14, 3, 30),
-            ParamDef('min_bars', 'int', 24, 5, 50),
-            ParamDef('confidence_min', 'float', 80.0, 30.0, 95.0, 5.0),
+            ParamDef('min_bars', 'int', 24, 12, 50,1),
+            ParamDef('confidence_min', 'float', 80.0, 30.0, 90.0, 5.0),
             ParamDef('ob_level', 'float', 1.5, 0.3, 3.0, 0.1),
             ParamDef('os_level', 'float', -1.5, -3.0, -0.3, 0.1),
 
-            # Filters
+            # Filters (HTF eliminado)
             ParamDef('use_trend', 'bool', True),
             ParamDef('use_volume', 'bool', True),
             ParamDef('volume_mult', 'float', 2.0, 0.5, 5.0, 0.1),
-            ParamDef('use_htf', 'bool', False),
 
-            # ── Risk params ──────────────────────────────────────────
-            # FIX: step era 50.0 → corregido a 5.0
-            ParamDef('leverage',    'float', 15.0, 1.0, 25.0, 5.0),
-            ParamDef('sl_atr_mult', 'float', 1.5, 0.5,  4.0, 0.1),
+            # ═══════════════════════════════════════════════════════════
+            #  SL/TP MODE SELECTOR
+            # ═══════════════════════════════════════════════════════════
+            #  slatr_tprr  → SL basado en ATR, TP basado en Risk:Reward
+            #  sltp_fixed  → SL y TP como porcentaje fijo del entry price
+            # ───────────────────────────────────────────────────────────
+            ParamDef('sltp_type', 'categorical', 'sltp_fixed',
+                     options=['slatr_tprr', 'sltp_fixed']),
 
-            # TP1 / TP2 — R:R multipliers sobre la distancia al SL
-            ParamDef('tp1_rr',   'float', 2.0, 0.5,  5.0, 0.25),
-            ParamDef('tp1_size', 'float', 0.6, 0.1,  0.9, 0.05),
-            ParamDef('tp2_rr',   'float', 3.0, 1.0, 10.0, 0.25),
+            # ── Risk params: ATR mode (slatr_tprr) ──────────────────
+            ParamDef('leverage',    'float', 15.0, 6.0, 40.0, 1.0),
+            ParamDef('sl_atr_mult', 'float', 1.5, 0.5, 4.0, 0.1),
+            ParamDef('tp1_rr',      'float', 2.0, 0.5, 5.0, 0.25),
+            ParamDef('tp1_size',    'float', 0.6, 0.1, 0.9, 0.05),
+            ParamDef('tp2_rr',      'float', 3.0, 1.0, 10.0, 0.25),
+
+            # ── Risk params: FIXED mode (sltp_fixed) ────────────────
+            #  SL y TP expresados como % del precio de entrada.
+            #  Ej: sl_fixed_pct=1.5 → SL a -1.5% del entry
+            #      tp1_fixed_pct=2.0 → TP1 a +2.0% del entry
+            #      tp2_fixed_pct=4.0 → TP2 a +4.0% del entry
+            # ────────────────────────────────────────────────────────
+            ParamDef('sl_fixed_pct',   'float', 2.5, 0.3, 5.0, 0.1),
+            ParamDef('tp1_fixed_pct',  'float', 3.0, 0.5, 5.0, 0.25),
+            ParamDef('tp1_fixed_size', 'float', 0.7, 0.1, 1.0, 0.05),
+            ParamDef('tp2_fixed_pct',  'float', 4.5, 1.0, 10.0, 0.5),
 
             # ── Break-even ────────────────────────────────────────────
-            ParamDef('be_pct', 'float', 1.5, 0.0, 2.5, 0.1),
+            ParamDef('be_pct', 'float', 1.5, 0.0, 3.5, 0.1),
 
             # ── Trailing stop ─────────────────────────────────────────
             ParamDef('use_trailing', 'bool', True),
-            ParamDef('trail_activate_pct', 'float', 2.5, 0.0, 5.0, 0.25),
-            ParamDef('trail_pullback_pct', 'float', 1.0, 0.1,  2.0, 0.10),
+            ParamDef('trail_activate_pct', 'float', 2.5, 0.0, 6.0, 0.25),
+            ParamDef('trail_pullback_pct', 'float', 1.0, 0.1, 2.0, 0.10),
 
             # ── Signal control ────────────────────────────────────────
             ParamDef('close_on_signal', 'bool', True),
             ParamDef('max_signals_per_day', 'int', 0, 0, 10),
         ]
 
+    # ─────────────────────────────────────────────────────────────
+    #  INDICATORS
+    # ─────────────────────────────────────────────────────────────
+
     def calculate_indicators(self, data: dict) -> dict:
-        """Calculate all CyberCycle indicators."""
+        """Calculate all CyberCycle v6.3 indicators."""
         src = data['hl2']
         close = data['close']
         vol = data['volume']
@@ -185,13 +251,6 @@ class CyberCycleStrategyv2(IStrategy):
         # ATR for SL/TP
         atr_vals = atr(data['high'], data['low'], close, 14)
 
-        # HTF filter (simplified: use higher-period EMA as proxy)
-        htf_src = ema(src, 40)
-        htf_cc = ema(close, 40)
-        use_htf = self.get_param('use_htf', True)
-        htf_bull = ~use_htf | (htf_src > htf_cc)
-        htf_bear = ~use_htf | (htf_src < htf_cc)
-
         return {
             'cycle': cycle,
             'trigger': trigger,
@@ -211,16 +270,74 @@ class CyberCycleStrategyv2(IStrategy):
             'in_os': in_os,
             'momentum3': momentum3,
             'atr': atr_vals,
-            'htf_align_buy': htf_bull,
-            'htf_align_sell': htf_bear,
             # All alphas for diagnostics
             'alpha_hd': a_hd, 'alpha_ma': a_ma,
             'alpha_ac': a_ac, 'alpha_kl': a_kl,
         }
 
+    # ─────────────────────────────────────────────────────────────
+    #  SL/TP CALCULATION — DUAL MODE
+    # ─────────────────────────────────────────────────────────────
+
+    def _compute_sltp_atr_rr(self, entry: float, direction: int,
+                              atr_val: float) -> dict:
+        """
+        Modo ATR + Risk:Reward.
+        SL = entry ∓ ATR × mult
+        TP = entry ± riesgo × R:R
+        """
+        sl_dist = atr_val * self.get_param('sl_atr_mult', 1.5)
+        sl = entry - direction * sl_dist
+
+        tp1_rr   = self.get_param('tp1_rr', 2.0)
+        tp2_rr   = self.get_param('tp2_rr', 3.0)
+        tp1_size = self.get_param('tp1_size', 0.6)
+        tp2_size = round(1.0 - tp1_size, 8)
+
+        tp1 = entry + direction * sl_dist * tp1_rr
+        tp2 = entry + direction * sl_dist * tp2_rr
+
+        return {
+            'sl': sl,
+            'tp_levels': [tp1, tp2],
+            'tp_sizes': [tp1_size, tp2_size],
+            'sl_dist': sl_dist,
+            'mode': 'slatr_tprr',
+        }
+
+    def _compute_sltp_fixed(self, entry: float, direction: int) -> dict:
+        """
+        Modo fijo: SL y TP como porcentaje del precio de entrada.
+        SL = entry × (1 ∓ sl_pct/100)
+        TP = entry × (1 ± tp_pct/100)
+        """
+        sl_pct  = self.get_param('sl_fixed_pct',   2.5) / 100.0
+        tp1_pct = self.get_param('tp1_fixed_pct',  3.0) / 100.0
+        tp2_pct = self.get_param('tp2_fixed_pct',  4.5) / 100.0
+        tp1_size = self.get_param('tp1_fixed_size', 0.7)
+        tp2_size = round(1.0 - tp1_size, 8)
+
+        sl  = entry * (1.0 - direction * sl_pct)
+        tp1 = entry * (1.0 + direction * tp1_pct)
+        tp2 = entry * (1.0 + direction * tp2_pct)
+
+        sl_dist = abs(entry - sl)
+
+        return {
+            'sl': sl,
+            'tp_levels': [tp1, tp2],
+            'tp_sizes': [tp1_size, tp2_size],
+            'sl_dist': sl_dist,
+            'mode': 'sltp_fixed',
+        }
+
+    # ─────────────────────────────────────────────────────────────
+    #  SIGNAL GENERATION
+    # ─────────────────────────────────────────────────────────────
+
     def generate_signal(self, ind: dict, idx: int,
                         data: dict) -> Optional[Signal]:
-        """Generate CyberCycle signal at bar idx."""
+        """Generate CyberCycle v6.3 signal at bar idx."""
         if idx < 10:
             return None
 
@@ -236,97 +353,71 @@ class CyberCycleStrategyv2(IStrategy):
             return None
 
         use_trend = self.get_param('use_trend', True)
-        use_vol = self.get_param('use_volume', True)
+        use_vol   = self.get_param('use_volume', True)
 
         is_buy = bull_cross
 
-        # ── Confidence scoring (sin cycle_strength) ──
-        # Cada componente suma puntos. confidence_min filtra.
-        conf = 0.0
+        # ── Confidence v6.3 (sin HTF, sin cycle_strength) ───────
+        conf = compute_confidence_v62(
+            is_buy=is_buy,
+            bull_cross=bull_cross,
+            bear_cross=bear_cross,
+            bull_trend=ind['bull_trend'][idx],
+            bear_trend=ind['bear_trend'][idx],
+            in_ob=ind['in_ob'][idx],
+            in_os=ind['in_os'][idx],
+            volume_ok=ind['volume_ok'][idx],
+            fish_rising=ind['fish_rising'][idx],
+            fish_falling=ind['fish_falling'][idx],
+            momentum_positive=ind['momentum3'][idx] > 0,
+            momentum_negative=ind['momentum3'][idx] < 0,
+            use_trend=use_trend,
+            use_vol=use_vol,
+        )
 
-        # Base: cross detected = 20 pts
-        conf += 20.0
-
-        # iTrend alignment: +25 pts
-        if is_buy and ind['bull_trend'][idx]:
-            conf += 25.0
-        elif not is_buy and ind['bear_trend'][idx]:
-            conf += 25.0
-
-        # Fisher alignment: +15 pts
-        if is_buy and ind['fish_rising'][idx]:
-            conf += 15.0
-        elif not is_buy and ind['fish_falling'][idx]:
-            conf += 15.0
-
-        # OB/OS zone: +15 pts
-        if is_buy and ind['in_os'][idx]:
-            conf += 15.0
-        elif not is_buy and ind['in_ob'][idx]:
-            conf += 15.0
-
-        # HTF alignment: +15 pts
-        if is_buy and ind['htf_align_buy'][idx]:
-            conf += 15.0
-        elif not is_buy and ind['htf_align_sell'][idx]:
-            conf += 15.0
-
-        # Momentum alignment: +10 pts
-        if is_buy and ind['momentum3'][idx] > 0:
-            conf += 10.0
-        elif not is_buy and ind['momentum3'][idx] < 0:
-            conf += 10.0
-
-        # Volume: already filtered via volume_ok, but add pts
-        if ind['volume_ok'][idx]:
-            conf += 10.0
-
-        # ── Confidence gate ──
         confidence_min = self.get_param('confidence_min', 80.0)
         if conf < confidence_min:
             return None
 
-        # ── Signal accepted ──
+        # ── Signal accepted ──────────────────────────────────────
         self._last_signal_bar = idx
 
-        entry = data['close'][idx]
-        atr_val = ind['atr'][idx]
-        if atr_val <= 0:
-            return None
-
         direction = 1 if is_buy else -1
+        entry     = data['close'][idx]
+        atr_val   = ind['atr'][idx]
 
-        # ── SL/TP calculation ──
-        sl_mult = self.get_param('sl_atr_mult', 1.5)
-        sl_dist = atr_val * sl_mult
-        sl = entry - direction * sl_dist
+        # ── SL/TP — dual mode ────────────────────────────────────
+        sltp_type = self.get_param('sltp_type', 'sltp_fixed')
 
-        tp1_rr = self.get_param('tp1_rr', 2.0)
-        tp2_rr = self.get_param('tp2_rr', 3.0)
-        tp1 = entry + direction * sl_dist * tp1_rr
-        tp2 = entry + direction * sl_dist * tp2_rr
+        if sltp_type == 'sltp_fixed':
+            sltp = self._compute_sltp_fixed(entry, direction)
+        else:
+            if atr_val <= 0:
+                return None
+            sltp = self._compute_sltp_atr_rr(entry, direction, atr_val)
 
-        tp1_size = self.get_param('tp1_size', 0.6)
-        tp_levels = [tp1, tp2]
-        tp_sizes = [tp1_size, 1.0 - tp1_size]
+        sl        = sltp['sl']
+        tp_levels = sltp['tp_levels']
+        tp_sizes  = sltp['tp_sizes']
+        sl_dist   = sltp['sl_dist']
 
-        # ── Break-even ──
+        # ── Break-even ───────────────────────────────────────────
         be_pct = self.get_param('be_pct', 1.5)
         if be_pct > 0.0:
             be_trigger = entry + direction * entry * (be_pct / 100.0)
         else:
             be_trigger = 0.0
 
-        # ── Trailing stop ──
+        # ── Trailing stop ────────────────────────────────────────
         use_trailing = self.get_param('use_trailing', True)
         if use_trailing:
             trail_activate_pct = self.get_param('trail_activate_pct', 2.5)
             trail_pullback_pct = self.get_param('trail_pullback_pct', 1.0)
-            trailing_distance = entry * (trail_pullback_pct / 100.0)
+            trailing_distance  = entry * (trail_pullback_pct / 100.0)
 
             trail_activation_price = entry + direction * entry * (trail_activate_pct / 100.0)
             if be_pct > 0.0:
-                dist_be = abs(be_trigger - entry)
+                dist_be    = abs(be_trigger - entry)
                 dist_trail = abs(trail_activation_price - entry)
                 be_trigger = be_trigger if dist_be <= dist_trail else trail_activation_price
             else:
@@ -353,13 +444,13 @@ class CyberCycleStrategyv2(IStrategy):
                 'period': ind['period'][idx],
                 'cycle': ind['cycle'][idx],
                 'fisher': ind['fisher'][idx],
+                'sltp_mode': sltp_type,
                 'sl_dist_atr': sl_dist / atr_val if atr_val > 0 else 0,
-                'tp1': tp1,
-                'tp2': tp2,
+                'tp1': tp_levels[0] if tp_levels else 0,
+                'tp2': tp_levels[1] if len(tp_levels) > 1 else 0,
                 'be_pct': be_pct,
                 'trail_pct': self.get_param('trail_pullback_pct', 1.0) if use_trailing else 0,
                 # ── Datos para intrabar entry ──
-                # El engine usa esto para buscar el cruce dentro de la barra
                 'intrabar_entry': True,
                 'signal_type': 'bull_cross' if is_buy else 'bear_cross',
                 'cycle_val': ind['cycle'][idx],
