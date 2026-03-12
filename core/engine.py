@@ -298,7 +298,7 @@ class BacktestEngine:
     def _open_position(self, signal: Signal, bar: dict, bar_idx: int):
         """Open a new position from a signal."""
         # Calculate position size
-        risk_capital = self._capital * 0.03  # 3% risk per trade
+        risk_capital = self._capital * 0.08# 8% risk per trade
 
         # Commission on entry
         size = risk_capital * signal.leverage
