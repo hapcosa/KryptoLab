@@ -252,7 +252,7 @@ def run_pipeline(args):
                     'n_jobs': args['n_jobs'],
                 }
                 if args['no_intrabar']:
-                    opt_args['no_detail'] = True
+                    opt_args['no_intrabar'] = True
                 if args['optimize_params']:
                     opt_args['optimize_params'] = args['optimize_params']
 
@@ -305,8 +305,7 @@ def run_pipeline(args):
                 'start': args['bt_start'],
                 'end': args['bt_end'],
             }
-            if args['no_intrabar']:
-                load_args['no_detail'] = True
+
 
             data, detail_info, symbol_out, tf_out = _load_data(load_args, tf)
             market = MarketConfig.detect(symbol)

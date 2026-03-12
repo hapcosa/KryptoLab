@@ -88,25 +88,16 @@ def evaluate_trial(args) -> dict:
     """
     Evaluate a single parameter set. Called in worker process.
     Receives only (trial_id, params_dict) — everything else is shared.
-
-    Uses IntrabarBacktestEngine when detail data is available so that
-    signal generation during optimization is IDENTICAL to backtest
-    (intrabar processor, same min_bars scaling, same SL/TP resolution).
-
-    Returns dict with all trial metrics.
     """
     trial_id, params_to_set = args
-
     t0 = time.time()
 
-    # FIX: Don't use copy.deepcopy (breaks complex strategy objects like
-    # CyberCycleStrategy with Ehlers filters, numpy state, etc.)
-    # Create a fresh instance and apply base params + trial params.
+    # Build strategy from shared base + trial params
     original_strategy = _shared['strategy']
     strategy_class = type(original_strategy)
     strategy = strategy_class()
     strategy.set_params(original_strategy.params)  # Base params (from JSON/defaults)
-    strategy.set_params(params_to_set)              # Override with trial's optimized params
+    strategy.set_params(params_to_set)  # Override with trial's optimized params
 
     cfg = _shared['engine_config']
     dd = cfg.get('detail_data')
@@ -149,9 +140,9 @@ def evaluate_trial(args) -> dict:
         rejection_reason = f"MIN_TRADES: {result.n_trades} < {_shared['min_trades']}"
     else:
         from optimize.grid_search import check_liquidation_safety, diagnose_rejection
-        if not check_liquidation_safety(result, max_leverage_sl_pct=200.0, max_liq_per_month=3):
+        if not check_liquidation_safety(result, max_liq_per_month=2):
             obj_val = -999.0
-            # Identify which sub-gate fired for the log
+            # Identify which month exceeded the cap
             from collections import defaultdict
             liq_by_month = defaultdict(int)
             for t in (result.trades or []):
@@ -159,27 +150,13 @@ def evaluate_trial(args) -> dict:
                     ts = getattr(t, 'exit_time', None) or getattr(t, 'exit_date', None)
                     mk = str(ts)[:7] if ts else f'unk_{id(t)}'
                     liq_by_month[mk] += 1
-            worst_month = max(liq_by_month.items(), key=lambda x: x[1]) if liq_by_month else None
-            if worst_month and worst_month[1] > 1:
+            if liq_by_month:
+                worst_month = max(liq_by_month.items(), key=lambda x: x[1])
                 rejection_reason = (
-                    f"LIQ_MONTHLY: {worst_month[1]} liquidations in {worst_month[0]} (max=3)"
+                    f"LIQ_MONTHLY: {worst_month[1]} liquidations in {worst_month[0]} (max=1)"
                 )
-            elif worst_month:
-                rejection_reason = f"LIQUIDATION: {sum(liq_by_month.values())} total liquidation(s)"
             else:
-                worst_risk, worst_lev, worst_sl = 0.0, 0.0, 0.0
-                for t in (result.trades or []):
-                    if getattr(t, 'exit_reason', '') == 'SL' and getattr(t, 'entry_price', 0) > 0:
-                        sl_dist = abs(t.entry_price - t.exit_price) / t.entry_price * 100
-                        risk = getattr(t, 'leverage', 1) * sl_dist
-                        if risk > worst_risk:
-                            worst_risk = risk
-                            worst_lev = getattr(t, 'leverage', 1)
-                            worst_sl = sl_dist
-                rejection_reason = (
-                    f"LIQUIDATION_RISK: lev={worst_lev}x × sl={worst_sl:.1f}% "
-                    f"= {worst_risk:.0f}% > 85%"
-                )
+                rejection_reason = "LIQUIDATION_GATE: unknown"
         else:
             obj_val = _shared['objective_fn'](result)
             if obj_val <= -999.0:
@@ -214,6 +191,7 @@ def evaluate_trial(args) -> dict:
         'objective_value': obj_val,
         'elapsed': elapsed,
     }
+
 
 def get_n_jobs(requested: int = -1) -> int:
     """

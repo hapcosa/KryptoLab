@@ -462,31 +462,25 @@ def objective_weekly_robust(result) -> float:
 
 
 def check_liquidation_safety(
-    result,
-    max_leverage_sl_pct: float = 200.0,
-    max_liq_per_month: int = 3,          # ← TUNE: max liquidations allowed per month
+        result,
+        max_liq_per_month: int = 2,
 ) -> bool:
     """
     Verify liquidation risk is within acceptable limits.
 
-    Two independent checks:
-      1. SL-proximity gate: leverage × sl_distance_pct must stay below
-         max_leverage_sl_pct (default 85%). Trades above this threshold
-         are dangerously close to margin call regardless of SL placement.
+    Single check: actual liquidation exits (exit_reason='liquidation')
+    must not exceed max_liq_per_month in any calendar month.
 
-      2. Monthly liquidation cap: actual liquidation exits (exit_reason='liquidation')
-         must not exceed max_liq_per_month in any calendar month.
-         Default = 1 (one liquidation per month is tolerated; two or more → reject).
-         Set to 0 to reject any liquidation.
+    Default = 1 (one liquidation per month tolerated; two or more → reject).
+    Set to 0 to reject any liquidation entirely.
 
-    ── Tuneable constants ──────────────────────────────────────────────────────
-        max_leverage_sl_pct : float = 85.0   # leverage × sl_dist% ceiling
-        max_liq_per_month   : int   = 1      # max liquidations allowed per month
-    ────────────────────────────────────────────────────────────────────────────
+    The old SL-proximity gate (leverage × sl_distance_pct) has been removed.
+    It produced false rejections on valid high-leverage trials. Monthly
+    liquidation cap is sufficient — if a trial actually gets liquidated
+    too often, it fails here naturally.
 
     Args:
         result: BacktestResult with .trades list
-        max_leverage_sl_pct: leverage × sl_distance ceiling
         max_liq_per_month: max actual liquidations allowed in any single month
 
     Returns:
@@ -500,7 +494,6 @@ def check_liquidation_safety(
 
     for trade in result.trades:
         if trade.exit_reason == 'liquidation':
-            # Count liquidations per month using exit timestamp
             ts = getattr(trade, 'exit_time', None) or getattr(trade, 'exit_date', None)
             if ts is not None:
                 try:
@@ -510,19 +503,7 @@ def check_liquidation_safety(
                     month_key = str(ts)[:7]
                 liq_by_month[month_key] += 1
             else:
-                # No timestamp → count as its own month to be conservative
                 liq_by_month[f'unknown_{id(trade)}'] += 1
-
-        # SL-proximity gate (unchanged)
-        elif trade.exit_reason == 'SL':
-            if trade.entry_price <= 0:
-                continue
-            if trade.direction == 1:  # LONG
-                sl_distance_pct = abs(trade.entry_price - trade.exit_price) / trade.entry_price * 100
-            else:  # SHORT
-                sl_distance_pct = abs(trade.exit_price - trade.entry_price) / trade.entry_price * 100
-            if trade.leverage * sl_distance_pct > max_leverage_sl_pct:
-                return False
 
     # Check monthly liquidation cap
     for month, count in liq_by_month.items():
@@ -532,7 +513,7 @@ def check_liquidation_safety(
     return True
 
 
-def diagnose_rejection(result) -> str:
+def diagnose_rejection(result, max_liq_per_month: int = 2) -> str:
     """
     Explain exactly why a trial received -999 from objective_monthly_robust.
     Useful for debugging trials with good SR/WR/PF that still get rejected.
@@ -540,7 +521,7 @@ def diagnose_rejection(result) -> str:
     Returns a human-readable string with the rejection reason, or 'PASS' if
     it would not be rejected.
     """
-    # Liquidation gate — check both SL-proximity and monthly cap
+    # Liquidation gate — monthly cap only (SL-proximity gate removed)
     if hasattr(result, 'trades'):
         from collections import defaultdict
         liq_by_month = defaultdict(int)
@@ -556,17 +537,9 @@ def diagnose_rejection(result) -> str:
                     liq_by_month[mk] += 1
                 else:
                     liq_by_month[f'unknown_{id(t)}'] += 1
-            elif getattr(t, 'exit_reason', '') == 'SL' and getattr(t, 'entry_price', 0) > 0:
-                if t.direction == 1:
-                    sl_dist = abs(t.entry_price - t.exit_price) / t.entry_price * 100
-                else:
-                    sl_dist = abs(t.exit_price - t.entry_price) / t.entry_price * 100
-                risk = t.leverage * sl_dist
-                if risk > 85.0:
-                    return f"LIQUIDATION_RISK: leverage×SL={risk:.1f}% > 85% (lev={t.leverage}x, sl_dist={sl_dist:.2f}%)"
         for month, count in liq_by_month.items():
-            if count > 3:  # mirrors max_liq_per_month=1
-                return f"LIQ_MONTHLY: {count} liquidations in {month} (max=3)"
+            if count > max_liq_per_month:
+                return f"LIQ_MONTHLY: {count} liquidations in {month} (max={max_liq_per_month})"
 
     # monthly_robust gates
     if result.win_rate < 40.0:
@@ -602,20 +575,26 @@ def diagnose_rejection(result) -> str:
             f"coverage={coverage:.2f} lev_factor={lev_factor:.2f} dd_factor={dd_factor:.2f}")
 
 
-def apply_liquidation_gate(objective_fn):
+def apply_liquidation_gate(objective_fn, max_liq_per_month: int = 2):
     """
-    Decorator: wraps any objective function with liquidation safety check.
-    Returns -999.0 (rejection) if any trade exceeds liquidation threshold.
+    Decorator: wraps any objective function with monthly liquidation cap.
+    Returns -999.0 (rejection) if any month exceeds max_liq_per_month.
+
+    Args:
+        objective_fn: The objective function to wrap
+        max_liq_per_month: Max liquidations per calendar month
+                           (0 = zero tolerance, 1 = one tolerated, etc.)
     """
 
     def wrapped(result) -> float:
-        if not check_liquidation_safety(result, max_leverage_sl_pct=200.0):
+        if not check_liquidation_safety(result, max_liq_per_month=max_liq_per_month):
             result._rejection_reason = "LIQUIDATION_GATE"
             return -999.0
         score = objective_fn(result)
         if score <= -999.0 and not hasattr(result, "_rejection_reason"):
             result._rejection_reason = f"OBJECTIVE_{objective_fn.__name__}"
         return score
+
     wrapped.__name__ = objective_fn.__name__
     wrapped.__doc__ = objective_fn.__doc__
     return wrapped
@@ -631,7 +610,6 @@ OBJECTIVES = {
     'weekly': apply_liquidation_gate(objective_weekly),
     'weekly_robust': apply_liquidation_gate(objective_weekly_robust),
 }
-
 
 class GridSearchOptimizer:
     """

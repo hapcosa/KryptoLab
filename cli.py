@@ -1136,7 +1136,8 @@ def cmd_targets(args):
     market = MarketConfig.detect(symbol)
     no_intrabar = args.get('no_intrabar', False)
     engine_factory = _make_engine_factory(capital, detail_info, market,
-                                          no_intrabar=no_intrabar)
+                                            no_intrabar=no_intrabar)
+    engine = engine_factory()
     result = engine.run(strategy, data, symbol, tf)
 
     from ml.temporal_targets import (

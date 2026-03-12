@@ -39,27 +39,18 @@ def _liquidation_detail(result) -> str:
     """Return a short string explaining which trade triggered the liquidation gate."""
     if not hasattr(result, 'trades') or not result.trades:
         return "no trades"
-    liq_trades = [t for t in result.trades if getattr(t, 'exit_reason', '') == 'liquidation']
-    if liq_trades:
-        return f"{len(liq_trades)} liquidation(s) found"
-    # Check SL trades near liquidation
-    worst = None
-    worst_risk = 0.0
+    from collections import defaultdict
+    liq_by_month = defaultdict(int)
     for t in result.trades:
-        if getattr(t, 'exit_reason', '') == 'SL' and getattr(t, 'entry_price', 0) > 0:
-            if t.direction == 1:
-                sl_dist = abs(t.entry_price - t.exit_price) / t.entry_price * 100
-            else:
-                sl_dist = abs(t.exit_price - t.entry_price) / t.entry_price * 100
-            risk = getattr(t, 'leverage', 1) * sl_dist
-            if risk > worst_risk:
-                worst_risk = risk
-                worst = t
-    if worst:
-        lev = getattr(worst, 'leverage', '?')
-        return (f"SL too close to liquidation: "
-                f"leverage={lev}x × sl_dist={worst_risk/lev:.1f}% = {worst_risk:.0f}% > 85%")
-    return "unknown"
+        if getattr(t, 'exit_reason', '') == 'liquidation':
+            ts = getattr(t, 'exit_time', None) or getattr(t, 'exit_date', None)
+            mk = str(ts)[:7] if ts else f'unk_{id(t)}'
+            liq_by_month[mk] += 1
+    if liq_by_month:
+        total = sum(liq_by_month.values())
+        worst = max(liq_by_month.items(), key=lambda x: x[1])
+        return f"{total} liquidation(s), worst month: {worst[0]} ({worst[1]})"
+    return "no liquidations found"
 
 
 @dataclass
