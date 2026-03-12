@@ -149,7 +149,7 @@ def evaluate_trial(args) -> dict:
         rejection_reason = f"MIN_TRADES: {result.n_trades} < {_shared['min_trades']}"
     else:
         from optimize.grid_search import check_liquidation_safety, diagnose_rejection
-        if not check_liquidation_safety(result, max_leverage_sl_pct=95.0, max_liq_per_month=2):
+        if not check_liquidation_safety(result, max_leverage_sl_pct=200.0, max_liq_per_month=3):
             obj_val = -999.0
             # Identify which sub-gate fired for the log
             from collections import defaultdict
@@ -162,7 +162,7 @@ def evaluate_trial(args) -> dict:
             worst_month = max(liq_by_month.items(), key=lambda x: x[1]) if liq_by_month else None
             if worst_month and worst_month[1] > 1:
                 rejection_reason = (
-                    f"LIQ_MONTHLY: {worst_month[1]} liquidations in {worst_month[0]} (max=1)"
+                    f"LIQ_MONTHLY: {worst_month[1]} liquidations in {worst_month[0]} (max=3)"
                 )
             elif worst_month:
                 rejection_reason = f"LIQUIDATION: {sum(liq_by_month.values())} total liquidation(s)"

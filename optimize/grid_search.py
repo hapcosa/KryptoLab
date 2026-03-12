@@ -463,8 +463,8 @@ def objective_weekly_robust(result) -> float:
 
 def check_liquidation_safety(
     result,
-    max_leverage_sl_pct: float = 95.0,
-    max_liq_per_month: int = 2,          # ← TUNE: max liquidations allowed per month
+    max_leverage_sl_pct: float = 200.0,
+    max_liq_per_month: int = 3,          # ← TUNE: max liquidations allowed per month
 ) -> bool:
     """
     Verify liquidation risk is within acceptable limits.
@@ -565,8 +565,8 @@ def diagnose_rejection(result) -> str:
                 if risk > 85.0:
                     return f"LIQUIDATION_RISK: leverage×SL={risk:.1f}% > 85% (lev={t.leverage}x, sl_dist={sl_dist:.2f}%)"
         for month, count in liq_by_month.items():
-            if count > 1:  # mirrors max_liq_per_month=1
-                return f"LIQ_MONTHLY: {count} liquidations in {month} (max=1)"
+            if count > 3:  # mirrors max_liq_per_month=1
+                return f"LIQ_MONTHLY: {count} liquidations in {month} (max=3)"
 
     # monthly_robust gates
     if result.win_rate < 40.0:
@@ -609,7 +609,7 @@ def apply_liquidation_gate(objective_fn):
     """
 
     def wrapped(result) -> float:
-        if not check_liquidation_safety(result, max_leverage_sl_pct=95.0):
+        if not check_liquidation_safety(result, max_leverage_sl_pct=200.0):
             result._rejection_reason = "LIQUIDATION_GATE"
             return -999.0
         score = objective_fn(result)
