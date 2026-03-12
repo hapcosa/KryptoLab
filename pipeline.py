@@ -656,8 +656,8 @@ def _print_symbol_leaderboard(sym_result):
             print(f"  #{t['trial_rank']:>2}  — failed —")
             continue
 
-        val_str = f"{val.get('layers_passed','?')}/4" if 'layers_passed' in val else '—'
-        tgt_str = f"{tgt.get('n_passed','?')}/{tgt.get('n_targets','?')}" if 'n_passed' in tgt else '—'
+        val_str = f"{val.get('layers_passed','?')}/4" if isinstance(val, dict) and 'layers_passed' in val else '—'
+        tgt_str = f"{tgt.get('n_passed','?')}/{tgt.get('n_targets','?')}" if isinstance(tgt, dict) and 'n_passed' in tgt else '—'
 
         best = sym_result.get('best_trial', {})
         marker = " ★" if t.get('trial_rank') == best.get('trial_rank') else ""
