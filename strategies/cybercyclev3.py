@@ -72,7 +72,7 @@ class CyberCycleStrategyv3(IStrategy):
                      options=['slatr_tprr', 'sltp_fixed']),
 
             # ── Risk params: ATR mode (slatr_tprr) ──────────────────
-            ParamDef('leverage',    'float', 20.0, 1.0, 25.0, 5.0),
+            ParamDef('leverage',    'float', 20.0, 5.0, 40.0, 5.0),
             ParamDef('sl_atr_mult', 'float', 1.5, 0.5,  4.0, 0.1),
 
             # TP1 / TP2 — R:R multipliers sobre la distancia al SL

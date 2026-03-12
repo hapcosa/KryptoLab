@@ -318,6 +318,16 @@ class BayesianOptimizer:
 
             obj_val = self._compute_objective(result)
 
+            # Debug: show rejection reason for -999 trials (only when verbose)
+            if obj_val <= -999.0 and self.verbose:
+                try:
+                    from optimize.grid_search import diagnose_rejection
+                    reason = diagnose_rejection(result)
+                    if not reason.startswith('PASS'):
+                        print(f"         ⚠️  Rejected: {reason}")
+                except Exception:
+                    pass
+
             # Store trial data
             bt = BayesianTrial(
                 trial_id=trial.number,

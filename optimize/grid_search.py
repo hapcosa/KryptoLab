@@ -504,6 +504,62 @@ def check_liquidation_safety(result, max_leverage_sl_pct: float = 85.0) -> bool:
     return True
 
 
+def diagnose_rejection(result) -> str:
+    """
+    Explain exactly why a trial received -999 from objective_monthly_robust.
+    Useful for debugging trials with good SR/WR/PF that still get rejected.
+
+    Returns a human-readable string with the rejection reason, or 'PASS' if
+    it would not be rejected.
+    """
+    # Liquidation gate
+    if hasattr(result, 'trades'):
+        for t in result.trades:
+            if getattr(t, 'exit_reason', '') == 'liquidation':
+                return "LIQUIDATION: trade exited via liquidation"
+            if getattr(t, 'exit_reason', '') == 'SL' and getattr(t, 'entry_price', 0) > 0:
+                if t.direction == 1:
+                    sl_dist = abs(t.entry_price - t.exit_price) / t.entry_price * 100
+                else:
+                    sl_dist = abs(t.exit_price - t.entry_price) / t.entry_price * 100
+                risk = t.leverage * sl_dist
+                if risk > 85.0:
+                    return f"LIQUIDATION_RISK: leverage×SL={risk:.1f}% > 85% (lev={t.leverage}x, sl_dist={sl_dist:.2f}%)"
+
+    # monthly_robust gates
+    if result.win_rate < 40.0:
+        return f"WIN_RATE: {result.win_rate:.1f}% < 40%"
+    if result.profit_factor < 1.0:
+        return f"PROFIT_FACTOR: {result.profit_factor:.2f} < 1.0"
+
+    ms = compute_monthly_stats(result.trades, initial_capital=getattr(result, 'initial_capital', 1000.0))
+    if ms['n_months'] < 2:
+        return f"N_MONTHS: only {ms['n_months']} month(s) with trades (need ≥2)"
+
+    cal_months = _total_calendar_months(result.trades, ms['n_months'])
+    freq = result.n_trades / cal_months
+    if freq < 3.5:
+        return f"TRADE_FREQ: {result.n_trades}t / {cal_months:.1f} cal_months = {freq:.2f}/mo < 3.5"
+
+    monthly_sr = ms['monthly_sharpe']
+    pct_pos = ms['pct_positive'] / 100.0
+    coverage = min(1.0, ms['n_months'] / cal_months)
+    worst_penalty = max(0.1, 1.0 + min(0, ms['worst_month']) / 100.0)
+    wr = result.win_rate / 100.0
+    wr_factor = 0.5 + 0.5 * min(1.0, (wr - 0.4) / 0.6)
+    lev = result.params.get('leverage', 1.0) if hasattr(result, 'params') else 1.0
+    lev_factor = 1.0 if lev <= 25 else max(0.3, 1.0 - (lev - 15) / 30.0)
+    dd = abs(result.max_drawdown)
+    dd_factor = 1.0 if dd <= 15 else max(0.2, 1.0 - (dd - 15) / 35.0)
+    pf_bonus = min(1.5, result.profit_factor / 2.0) if result.profit_factor > 0 else 0.5
+    coverage_factor = coverage ** 0.5
+    score = monthly_sr * pct_pos * worst_penalty * wr_factor * lev_factor * dd_factor * pf_bonus * coverage_factor
+
+    return (f"PASS (score={score:.4f}) | mSR={monthly_sr:.2f} pct_pos={pct_pos:.0%} "
+            f"worst={ms['worst_month']:.1f}% n_months={ms['n_months']} cal_months={cal_months:.0f} "
+            f"coverage={coverage:.2f} lev_factor={lev_factor:.2f} dd_factor={dd_factor:.2f}")
+
+
 def apply_liquidation_gate(objective_fn):
     """
     Decorator: wraps any objective function with liquidation safety check.

@@ -478,11 +478,138 @@ def _evaluate_single_trial(trial_idx, trial_params, is_metrics,
         if len(trade_df) > 0:
             trade_df.to_csv(sym_dir / f"trades_trial{trial_idx}.csv", index=False)
 
+        # ── VALIDATION GATE ──
+        # Only run expensive steps if OOS backtest shows real promise
+        ret    = bt_result.total_return
+        dd     = bt_result.max_drawdown
+        ntrades = bt_result.n_trades
+        passes_gate = (ret > 0 and dd < ret and ntrades >= 10)
+
+        if not passes_gate:
+            result['skipped_reason'] = (
+                f"gate: ret={ret:+.1f}% dd={dd:.1f}% t={ntrades}"
+            )
+        else:
+            # ── VALIDATE (WFA + Monte Carlo) ──
+            try:
+                print(f"    🔬 Validate...", end=" ", flush=True)
+                from optimize.anti_overfit import AntiOverfitPipeline
+
+                strategy_val = get_strategy(strategy_name)
+                strategy_val.set_params({'leverage': leverage})
+                strategy_val.set_params(trial_params)
+
+                param_grid = _build_validation_grid(strategy_val)
+
+                pipeline = AntiOverfitPipeline(
+                    wfa_windows=4,
+                    mc_simulations=args.get('mc_sims', 500),
+                    fail_fast=False,
+                    verbose=False,
+                )
+                val_result = pipeline.run(
+                    strategy_val, data, engine_factory,
+                    param_grid, symbol, tf,
+                )
+
+                # Flatten result into serializable dict
+                val = {
+                    'all_passed':    getattr(val_result, 'all_passed', False),
+                    'layers_passed': getattr(val_result, 'layers_passed', 0),
+                    'wfa_passed':    getattr(val_result, 'wfa_passed', False),
+                    'mc_passed':     getattr(val_result, 'mc_passed', False),
+                    'sensitivity_passed': getattr(val_result, 'sensitivity_passed', False),
+                    'overfit_passed':     getattr(val_result, 'overfit_passed', False),
+                }
+                result['validate'] = val
+                passed = val['layers_passed']
+                mark = "✅" if val['all_passed'] else "⚠️"
+                print(f"{mark} {passed}/4 layers")
+
+            except Exception as e:
+                print(f"❌ {e}")
+                result['validate'] = {'status': 'FAILED', 'error': str(e)}
+
+            # ── REGIME ──
+            try:
+                print(f"    🔄 Regime...", end=" ", flush=True)
+                from ml.regime_detector import detect_regime, strategy_regime_performance
+                from data.bitget_client import MarketConfig
+
+                strategy_reg = get_strategy(strategy_name)
+                strategy_reg.set_params({'leverage': leverage})
+                strategy_reg.set_params(trial_params)
+
+                market = MarketConfig.detect(symbol)
+                no_intrabar = args.get('no_intrabar', False)
+                from cli import _make_engine_factory
+                engine_factory_reg = _make_engine_factory(
+                    capital, detail_info, market, no_intrabar=no_intrabar)
+
+                rr   = detect_regime(data, method='vt', verbose=False)
+                perf = strategy_regime_performance(
+                    strategy_reg, data, engine_factory_reg, rr,
+                    symbol=symbol, timeframe=tf, verbose=False)
+
+                # Serialize regime result
+                reg = {}
+                if hasattr(perf, '__dict__'):
+                    reg = {k: v for k, v in perf.__dict__.items()
+                           if isinstance(v, (int, float, str, bool, list, dict))}
+                elif isinstance(perf, dict):
+                    reg = perf
+                result['regime'] = reg
+                print("✅")
+
+            except Exception as e:
+                print(f"❌ {e}")
+                result['regime'] = {'status': 'FAILED', 'error': str(e)}
+
+            # ── TARGETS ──
+            try:
+                print(f"    📅 Targets...", end=" ", flush=True)
+                import numpy as np
+                from ml.temporal_targets import (
+                    evaluate_targets,
+                    CONSERVATIVE_TARGETS, AGGRESSIVE_TARGETS, CONSISTENCY_TARGETS,
+                )
+
+                targets_map = {
+                    'conservative': CONSERVATIVE_TARGETS,
+                    'aggressive':   AGGRESSIVE_TARGETS,
+                    'consistency':  CONSISTENCY_TARGETS,
+                }
+                target_preset = args.get('targets', 'conservative')
+                targets = targets_map.get(target_preset, CONSERVATIVE_TARGETS)
+
+                tt_result = evaluate_targets(
+                    targets,
+                    bt_result.trades,
+                    data.get('timestamp', np.arange(len(data['close']))),
+                    bt_result.equity_curve,
+                    initial_capital=capital,
+                    verbose=False,
+                )
+
+                tgt = {
+                    'all_passed': getattr(tt_result, 'all_passed', False),
+                    'n_passed':   getattr(tt_result, 'n_passed', 0),
+                    'n_targets':  getattr(tt_result, 'n_targets', 0),
+                }
+                result['targets'] = tgt
+                mark = "✅" if tgt['all_passed'] else "⚠️"
+                print(f"{mark} {tgt['n_passed']}/{tgt['n_targets']} targets")
+
+            except Exception as e:
+                print(f"❌ {e}")
+                result['targets'] = {'status': 'FAILED', 'error': str(e)}
+
     except Exception as e:
         print(f"❌ {e}")
         result['backtest'] = {'status': 'FAILED', 'error': str(e)}
 
-    return result  # FIX: faltaba este return — sin él Python retorna None
+    result['elapsed_seconds'] = round(time.time() - trial_t0, 1)
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -529,8 +656,8 @@ def _print_symbol_leaderboard(sym_result):
             print(f"  #{t['trial_rank']:>2}  — failed —")
             continue
 
-        val_str = f"{val.get('layers_passed','?')}/4" if isinstance(val, dict) and 'layers_passed' in val else '—'
-        tgt_str = f"{tgt.get('n_passed','?')}/{tgt.get('n_targets','?')}" if isinstance(tgt, dict) and 'n_passed' in tgt else '—'
+        val_str = f"{val.get('layers_passed','?')}/4" if 'layers_passed' in val else '—'
+        tgt_str = f"{tgt.get('n_passed','?')}/{tgt.get('n_targets','?')}" if 'n_passed' in tgt else '—'
 
         best = sym_result.get('best_trial', {})
         marker = " ★" if t.get('trial_rank') == best.get('trial_rank') else ""
