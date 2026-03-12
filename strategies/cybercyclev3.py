@@ -51,7 +51,7 @@ class CyberCycleStrategyv3(IStrategy):
             # Signal params
             ParamDef('itrend_alpha', 'float', 0.09, 0.01, 0.30, 0.01),
             ParamDef('trigger_ema', 'int', 9, 3, 30),
-            ParamDef('min_bars', 'int', 16, 5, 50),
+            ParamDef('min_bars', 'int', 16, 12, 50),
             ParamDef('confidence_min', 'float', 75.0, 30.0, 95.0, 5.0),
             ParamDef('ob_level', 'float', 1.5, 0.3, 3.0, 0.1),
             ParamDef('os_level', 'float', -1.5, -3.0, -0.3, 0.1),
@@ -92,12 +92,12 @@ class CyberCycleStrategyv3(IStrategy):
             ParamDef('tp2_fixed_pct',  'float', 2.0, 1.0, 10.0, 0.5),
 
             # ── Break-even ────────────────────────────────────────────
-            ParamDef('be_pct', 'float', 1.0, 0.0, 2.5, 0.1),
+            ParamDef('be_pct', 'float', 1.0, 0.8, 4.5, 0.1),
 
             # ── Trailing stop ─────────────────────────────────────────
             ParamDef('use_trailing', 'bool', True),
-            ParamDef('trail_activate_pct', 'float', 2.5, 0.0, 5.0, 0.25),
-            ParamDef('trail_pullback_pct', 'float', 1.0, 0.1,  2.0, 0.10),
+            ParamDef('trail_activate_pct', 'float', 2.5, 1.0, 6.0, 0.25),
+            ParamDef('trail_pullback_pct', 'float', 1.0, 0.7,  3.0, 0.10),
 
             # ── Signal control ────────────────────────────────────────
             ParamDef('close_on_signal', 'bool', True),
