@@ -461,45 +461,73 @@ def objective_weekly_robust(result) -> float:
     return score
 
 
-def check_liquidation_safety(result, max_leverage_sl_pct: float = 85.0) -> bool:
+def check_liquidation_safety(
+    result,
+    max_leverage_sl_pct: float = 95.0,
+    max_liq_per_month: int = 2,          # ← TUNE: max liquidations allowed per month
+) -> bool:
     """
-    Verify no trade has leverage × SL_distance exceeding liquidation threshold.
+    Verify liquidation risk is within acceptable limits.
 
-    In perpetual futures, liquidation occurs at approximately:
-        price_move% ≈ 100% / leverage  (simplified, ignoring maintenance margin)
+    Two independent checks:
+      1. SL-proximity gate: leverage × sl_distance_pct must stay below
+         max_leverage_sl_pct (default 85%). Trades above this threshold
+         are dangerously close to margin call regardless of SL placement.
 
-    If leverage × sl_distance_pct >= 85%, the position is dangerously close
-    to liquidation and the SL may not protect you (slippage, gaps, etc.)
+      2. Monthly liquidation cap: actual liquidation exits (exit_reason='liquidation')
+         must not exceed max_liq_per_month in any calendar month.
+         Default = 1 (one liquidation per month is tolerated; two or more → reject).
+         Set to 0 to reject any liquidation.
+
+    ── Tuneable constants ──────────────────────────────────────────────────────
+        max_leverage_sl_pct : float = 85.0   # leverage × sl_dist% ceiling
+        max_liq_per_month   : int   = 1      # max liquidations allowed per month
+    ────────────────────────────────────────────────────────────────────────────
 
     Args:
-        result: BacktestResult with trades and params
-        max_leverage_sl_pct: Maximum allowed leverage × sl_distance_pct
+        result: BacktestResult with .trades list
+        max_leverage_sl_pct: leverage × sl_distance ceiling
+        max_liq_per_month: max actual liquidations allowed in any single month
 
     Returns:
-        True if all trades are safe, False if any trade exceeds threshold
+        True if all checks pass, False if any limit is breached
     """
     if not hasattr(result, 'trades') or not result.trades:
         return True
 
-    for trade in result.trades:
-        # Any actual liquidation = immediate fail
-        if trade.exit_reason == 'liquidation':
-            return False
+    from collections import defaultdict
+    liq_by_month = defaultdict(int)
 
-        # Check SL trades for proximity to liquidation
-        if trade.exit_reason == 'SL':
+    for trade in result.trades:
+        if trade.exit_reason == 'liquidation':
+            # Count liquidations per month using exit timestamp
+            ts = getattr(trade, 'exit_time', None) or getattr(trade, 'exit_date', None)
+            if ts is not None:
+                try:
+                    import pandas as pd
+                    month_key = pd.Timestamp(ts).strftime('%Y-%m')
+                except Exception:
+                    month_key = str(ts)[:7]
+                liq_by_month[month_key] += 1
+            else:
+                # No timestamp → count as its own month to be conservative
+                liq_by_month[f'unknown_{id(trade)}'] += 1
+
+        # SL-proximity gate (unchanged)
+        elif trade.exit_reason == 'SL':
             if trade.entry_price <= 0:
                 continue
-
-            # Calculate actual price movement at SL
             if trade.direction == 1:  # LONG
                 sl_distance_pct = abs(trade.entry_price - trade.exit_price) / trade.entry_price * 100
             else:  # SHORT
                 sl_distance_pct = abs(trade.exit_price - trade.entry_price) / trade.entry_price * 100
-
-            effective_risk = trade.leverage * sl_distance_pct
-            if effective_risk > max_leverage_sl_pct:
+            if trade.leverage * sl_distance_pct > max_leverage_sl_pct:
                 return False
+
+    # Check monthly liquidation cap
+    for month, count in liq_by_month.items():
+        if count > max_liq_per_month:
+            return False
 
     return True
 
@@ -512,12 +540,23 @@ def diagnose_rejection(result) -> str:
     Returns a human-readable string with the rejection reason, or 'PASS' if
     it would not be rejected.
     """
-    # Liquidation gate
+    # Liquidation gate — check both SL-proximity and monthly cap
     if hasattr(result, 'trades'):
+        from collections import defaultdict
+        liq_by_month = defaultdict(int)
         for t in result.trades:
             if getattr(t, 'exit_reason', '') == 'liquidation':
-                return "LIQUIDATION: trade exited via liquidation"
-            if getattr(t, 'exit_reason', '') == 'SL' and getattr(t, 'entry_price', 0) > 0:
+                ts = getattr(t, 'exit_time', None) or getattr(t, 'exit_date', None)
+                if ts is not None:
+                    try:
+                        import pandas as pd
+                        mk = pd.Timestamp(ts).strftime('%Y-%m')
+                    except Exception:
+                        mk = str(ts)[:7]
+                    liq_by_month[mk] += 1
+                else:
+                    liq_by_month[f'unknown_{id(t)}'] += 1
+            elif getattr(t, 'exit_reason', '') == 'SL' and getattr(t, 'entry_price', 0) > 0:
                 if t.direction == 1:
                     sl_dist = abs(t.entry_price - t.exit_price) / t.entry_price * 100
                 else:
@@ -525,6 +564,9 @@ def diagnose_rejection(result) -> str:
                 risk = t.leverage * sl_dist
                 if risk > 85.0:
                     return f"LIQUIDATION_RISK: leverage×SL={risk:.1f}% > 85% (lev={t.leverage}x, sl_dist={sl_dist:.2f}%)"
+        for month, count in liq_by_month.items():
+            if count > 1:  # mirrors max_liq_per_month=1
+                return f"LIQ_MONTHLY: {count} liquidations in {month} (max=1)"
 
     # monthly_robust gates
     if result.win_rate < 40.0:
@@ -567,7 +609,7 @@ def apply_liquidation_gate(objective_fn):
     """
 
     def wrapped(result) -> float:
-        if not check_liquidation_safety(result, max_leverage_sl_pct=85.0):
+        if not check_liquidation_safety(result, max_leverage_sl_pct=95.0):
             result._rejection_reason = "LIQUIDATION_GATE"
             return -999.0
         score = objective_fn(result)

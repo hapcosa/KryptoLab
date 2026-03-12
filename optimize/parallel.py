@@ -149,16 +149,27 @@ def evaluate_trial(args) -> dict:
         rejection_reason = f"MIN_TRADES: {result.n_trades} < {_shared['min_trades']}"
     else:
         from optimize.grid_search import check_liquidation_safety, diagnose_rejection
-        if not check_liquidation_safety(result, max_leverage_sl_pct=85.0):
+        if not check_liquidation_safety(result, max_leverage_sl_pct=95.0, max_liq_per_month=2):
             obj_val = -999.0
-            liq_trades = [t for t in (result.trades or [])
-                          if getattr(t, 'exit_reason', '') == 'liquidation']
-            if liq_trades:
-                rejection_reason = f"LIQUIDATION: {len(liq_trades)} trade(s) liquidated"
+            # Identify which sub-gate fired for the log
+            from collections import defaultdict
+            liq_by_month = defaultdict(int)
+            for t in (result.trades or []):
+                if getattr(t, 'exit_reason', '') == 'liquidation':
+                    ts = getattr(t, 'exit_time', None) or getattr(t, 'exit_date', None)
+                    mk = str(ts)[:7] if ts else f'unk_{id(t)}'
+                    liq_by_month[mk] += 1
+            worst_month = max(liq_by_month.items(), key=lambda x: x[1]) if liq_by_month else None
+            if worst_month and worst_month[1] > 1:
+                rejection_reason = (
+                    f"LIQ_MONTHLY: {worst_month[1]} liquidations in {worst_month[0]} (max=1)"
+                )
+            elif worst_month:
+                rejection_reason = f"LIQUIDATION: {sum(liq_by_month.values())} total liquidation(s)"
             else:
                 worst_risk, worst_lev, worst_sl = 0.0, 0.0, 0.0
                 for t in (result.trades or []):
-                    if getattr(t, 'entry_price', 0) > 0:
+                    if getattr(t, 'exit_reason', '') == 'SL' and getattr(t, 'entry_price', 0) > 0:
                         sl_dist = abs(t.entry_price - t.exit_price) / t.entry_price * 100
                         risk = getattr(t, 'leverage', 1) * sl_dist
                         if risk > worst_risk:

@@ -96,8 +96,8 @@ class CyberCycleStrategyv3(IStrategy):
 
             # ── Trailing stop ─────────────────────────────────────────
             ParamDef('use_trailing', 'bool', True),
-            ParamDef('trail_activate_pct', 'float', 2.5, 1.0, 6.0, 0.25),
-            ParamDef('trail_pullback_pct', 'float', 1.0, 0.7,  3.0, 0.10),
+            ParamDef('trail_activate_pct', 'float', 2.5, 0.6, 6.0, 0.25),
+            ParamDef('trail_pullback_pct', 'float', 1.0, 0.5,  3.0, 0.10),
 
             # ── Signal control ────────────────────────────────────────
             ParamDef('close_on_signal', 'bool', True),
