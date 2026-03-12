@@ -363,17 +363,11 @@ def objective_monthly_robust(result) -> float:
 
     # Leverage penalty: no penalty ≤15x, linear decay 15x→30x
     lev = result.params.get('leverage', 1.0) if hasattr(result, 'params') else 1.0
-    if lev <= 25:
-        lev_factor = 1.0
-    else:
-        lev_factor = max(0.3, 1.0 - (lev - 15) / 30.0)  # 30x → 0.5, 45x → 0.0
+    lev_factor = 1.0 if lev <= 40 else max(0.3, 1.0 - (lev - 40) / 40.0)
 
     # Drawdown penalty: no penalty ≤15%, linear decay 15%→50%
     dd = abs(result.max_drawdown)
-    if dd <= 15:
-        dd_factor = 1.0
-    else:
-        dd_factor = max(0.2, 1.0 - (dd - 15) / 35.0)
+    dd_factor = 1.0 if dd <= 20 else max(0.2, 1.0 - (dd - 20) / 40.0)
 
     # Profit factor bonus: PF=1.5 → 1.0, PF=3.0 → 1.3
     pf_bonus = min(1.5, result.profit_factor / 2.0) if result.profit_factor > 0 else 0.5
