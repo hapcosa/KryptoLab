@@ -142,9 +142,45 @@ def evaluate_trial(args) -> dict:
     result = engine.run(strategy, _shared['data'],
                         _shared['symbol'], _shared['timeframe'])
 
-    # Compute objective
-    obj_val = (_shared['objective_fn'](result)
-               if result.n_trades >= _shared['min_trades'] else -999.0)
+    # Compute objective + rejection diagnosis
+    rejection_reason = None
+    if result.n_trades < _shared['min_trades']:
+        obj_val = -999.0
+        rejection_reason = f"MIN_TRADES: {result.n_trades} < {_shared['min_trades']}"
+    else:
+        from optimize.grid_search import check_liquidation_safety, diagnose_rejection
+        if not check_liquidation_safety(result, max_leverage_sl_pct=85.0):
+            obj_val = -999.0
+            liq_trades = [t for t in (result.trades or [])
+                          if getattr(t, 'exit_reason', '') == 'liquidation']
+            if liq_trades:
+                rejection_reason = f"LIQUIDATION: {len(liq_trades)} trade(s) liquidated"
+            else:
+                worst_risk, worst_lev, worst_sl = 0.0, 0.0, 0.0
+                for t in (result.trades or []):
+                    if getattr(t, 'entry_price', 0) > 0:
+                        sl_dist = abs(t.entry_price - t.exit_price) / t.entry_price * 100
+                        risk = getattr(t, 'leverage', 1) * sl_dist
+                        if risk > worst_risk:
+                            worst_risk = risk
+                            worst_lev = getattr(t, 'leverage', 1)
+                            worst_sl = sl_dist
+                rejection_reason = (
+                    f"LIQUIDATION_RISK: lev={worst_lev}x × sl={worst_sl:.1f}% "
+                    f"= {worst_risk:.0f}% > 85%"
+                )
+        else:
+            obj_val = _shared['objective_fn'](result)
+            if obj_val <= -999.0:
+                rejection_reason = diagnose_rejection(result)
+
+    if obj_val <= -999.0 and rejection_reason:
+        print(
+            f"         ⚠️  [{trial_id}] Rejected "
+            f"(SR={result.sharpe_ratio:.2f} Ret={result.total_return:+.0f}% "
+            f"WR={result.win_rate:.0f}%): {rejection_reason}",
+            flush=True
+        )
 
     # Full param snapshot (defaults + loaded + optimized)
     full_params = strategy.default_params()
