@@ -96,8 +96,8 @@ def evaluate_trial(args) -> dict:
     original_strategy = _shared['strategy']
     strategy_class = type(original_strategy)
     strategy = strategy_class()
-    strategy.set_params(original_strategy.params)  # Base params (from JSON/defaults)
-    strategy.set_params(params_to_set)  # Override with trial's optimized params
+    strategy.set_params(original_strategy.params)
+    strategy.set_params(params_to_set)
 
     cfg = _shared['engine_config']
     dd = cfg.get('detail_data')
@@ -148,12 +148,19 @@ def evaluate_trial(args) -> dict:
             for t in (result.trades or []):
                 if getattr(t, 'exit_reason', '') == 'liquidation':
                     ts = getattr(t, 'exit_time', None) or getattr(t, 'exit_date', None)
-                    mk = str(ts)[:7] if ts else f'unk_{id(t)}'
+                    if ts is not None:
+                        try:
+                            import pandas as pd
+                            mk = pd.Timestamp(ts, unit='ms').strftime('%Y-%m')
+                        except Exception:
+                            mk = str(ts)[:7]
+                    else:
+                        mk = f'unk_{id(t)}'
                     liq_by_month[mk] += 1
             if liq_by_month:
                 worst_month = max(liq_by_month.items(), key=lambda x: x[1])
                 rejection_reason = (
-                    f"LIQ_MONTHLY: {worst_month[1]} liquidations in {worst_month[0]} (max=1)"
+                    f"LIQ_MONTHLY: {worst_month[1]} liquidations in {worst_month[0]} (max=2)"
                 )
             else:
                 rejection_reason = "LIQUIDATION_GATE: unknown"
@@ -191,8 +198,6 @@ def evaluate_trial(args) -> dict:
         'objective_value': obj_val,
         'elapsed': elapsed,
     }
-
-
 def get_n_jobs(requested: int = -1) -> int:
     """
     Resolve n_jobs:

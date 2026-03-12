@@ -44,14 +44,20 @@ def _liquidation_detail(result) -> str:
     for t in result.trades:
         if getattr(t, 'exit_reason', '') == 'liquidation':
             ts = getattr(t, 'exit_time', None) or getattr(t, 'exit_date', None)
-            mk = str(ts)[:7] if ts else f'unk_{id(t)}'
+            if ts is not None:
+                try:
+                    import pandas as pd
+                    mk = pd.Timestamp(ts, unit='ms').strftime('%Y-%m')
+                except Exception:
+                    mk = str(ts)[:7]
+            else:
+                mk = f'unk_{id(t)}'
             liq_by_month[mk] += 1
     if liq_by_month:
         total = sum(liq_by_month.values())
         worst = max(liq_by_month.items(), key=lambda x: x[1])
         return f"{total} liquidation(s), worst month: {worst[0]} ({worst[1]})"
     return "no liquidations found"
-
 
 @dataclass
 class BayesianTrial:

@@ -150,7 +150,6 @@ class CyberCycleStrategyv2(IStrategy):
     # ─────────────────────────────────────────────────────────────
     #  INDICATORS
     # ─────────────────────────────────────────────────────────────
-
     def calculate_indicators(self, data: dict) -> dict:
         """Calculate all CyberCycle v6.3 indicators."""
         src = data['hl2']
@@ -160,46 +159,35 @@ class CyberCycleStrategyv2(IStrategy):
 
         method = self.get_param('alpha_method', 'manual')
 
-        # Compute ALL alpha methods (Pine calls all each bar for state)
-        a_hd, p_hd = homodyne_alpha(
-            src,
-            self.get_param('hd_min_period', 3.0),
-            self.get_param('hd_max_period', 40.0)
-        )
-        a_ma, p_ma = mama_alpha(
-            src,
-            self.get_param('mama_fast', 0.5),
-            self.get_param('mama_slow', 0.05)
-        )
-        a_ac, p_ac = autocorrelation_alpha(
-            src,
-            self.get_param('ac_min_period', 6),
-            self.get_param('ac_max_period', 48),
-            self.get_param('ac_avg_length', 3)
-        )
-        a_kl, p_kl = kalman_alpha(
-            src,
-            self.get_param('kal_process_noise', 0.01),
-            self.get_param('kal_meas_noise', 0.5),
-            self.get_param('kal_alpha_fast', 0.5),
-            self.get_param('kal_alpha_slow', 0.05),
-            self.get_param('kal_sensitivity', 2.0)
-        )
-
-        # Select active alpha
-        alpha_map = {
-            'homodyne': (a_hd, p_hd),
-            'mama': (a_ma, p_ma),
-            'autocorrelation': (a_ac, p_ac),
-            'kalman': (a_kl, p_kl),
-        }
-
-        if method == 'manual':
+        # ── Solo computar el alpha seleccionado (4x menos CPU) ──
+        if method == 'homodyne':
+            alpha, period = homodyne_alpha(
+                src,
+                self.get_param('hd_min_period', 3.0),
+                self.get_param('hd_max_period', 40.0))
+        elif method == 'mama':
+            alpha, period = mama_alpha(
+                src,
+                self.get_param('mama_fast', 0.5),
+                self.get_param('mama_slow', 0.05))
+        elif method == 'autocorrelation':
+            alpha, period = autocorrelation_alpha(
+                src,
+                self.get_param('ac_min_period', 6),
+                self.get_param('ac_max_period', 48),
+                self.get_param('ac_avg_length', 3))
+        elif method == 'kalman':
+            alpha, period = kalman_alpha(
+                src,
+                self.get_param('kal_process_noise', 0.01),
+                self.get_param('kal_meas_noise', 0.5),
+                self.get_param('kal_alpha_fast', 0.5),
+                self.get_param('kal_alpha_slow', 0.05),
+                self.get_param('kal_sensitivity', 2.0))
+        else:  # manual
             manual_a = self.get_param('manual_alpha', 0.35)
             alpha = np.full(n, manual_a)
             period = np.full(n, (2.0 / manual_a) - 1.0)
-        else:
-            alpha, period = alpha_map.get(method, (a_ma, p_ma))
 
         # Apply alpha floor
         floor = self.get_param('alpha_floor', 0.0)
@@ -217,16 +205,16 @@ class CyberCycleStrategyv2(IStrategy):
         bull_trend = np.zeros(n, dtype=bool)
         bear_trend = np.zeros(n, dtype=bool)
         for i in range(2, n):
-            bull_trend[i] = it[i] > it[i-2]
-            bear_trend[i] = it[i] < it[i-2]
+            bull_trend[i] = it[i] > it[i - 2]
+            bear_trend[i] = it[i] < it[i - 2]
 
         # Fisher Transform
         fisher = fisher_transform(cycle, 10)
         fish_rising = np.zeros(n, dtype=bool)
         fish_falling = np.zeros(n, dtype=bool)
         for i in range(1, n):
-            fish_rising[i] = fisher[i] > fisher[i-1]
-            fish_falling[i] = fisher[i] < fisher[i-1]
+            fish_rising[i] = fisher[i] > fisher[i - 1]
+            fish_falling[i] = fisher[i] < fisher[i - 1]
 
         # Volume filter
         vol_ratio = volume_ratio(vol, 20)
@@ -246,35 +234,30 @@ class CyberCycleStrategyv2(IStrategy):
         # Momentum
         momentum3 = np.zeros(n)
         for i in range(3, n):
-            momentum3[i] = cycle[i] - cycle[i-3]
+            momentum3[i] = cycle[i] - cycle[i - 3]
 
-        # ATR for SL/TP
-        atr_vals = atr(data['high'], data['low'], close, 14)
+        # ATR
+        atr14 = atr(data['high'], data['low'], close, 14)
 
         return {
-            'cycle': cycle,
-            'trigger': trigger,
             'alpha': alpha,
             'period': period,
+            'cycle': cycle,
+            'trigger': trigger,
             'itrend': it,
-            'bull_trend': bull_trend,
-            'bear_trend': bear_trend,
             'fisher': fisher,
-            'fish_rising': fish_rising,
-            'fish_falling': fish_falling,
-            'vol_ratio': vol_ratio,
-            'volume_ok': volume_ok,
             'bull_cross': bull_cross,
             'bear_cross': bear_cross,
+            'bull_trend': bull_trend,
+            'bear_trend': bear_trend,
+            'fish_rising': fish_rising,
+            'fish_falling': fish_falling,
+            'volume_ok': volume_ok,
             'in_ob': in_ob,
             'in_os': in_os,
             'momentum3': momentum3,
-            'atr': atr_vals,
-            # All alphas for diagnostics
-            'alpha_hd': a_hd, 'alpha_ma': a_ma,
-            'alpha_ac': a_ac, 'alpha_kl': a_kl,
+            'atr': atr14,
         }
-
     # ─────────────────────────────────────────────────────────────
     #  SL/TP CALCULATION — DUAL MODE
     # ─────────────────────────────────────────────────────────────

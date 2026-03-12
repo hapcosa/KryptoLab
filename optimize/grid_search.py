@@ -471,13 +471,8 @@ def check_liquidation_safety(
     Single check: actual liquidation exits (exit_reason='liquidation')
     must not exceed max_liq_per_month in any calendar month.
 
-    Default = 1 (one liquidation per month tolerated; two or more → reject).
+    Default = 2 (up to two liquidations per month tolerated).
     Set to 0 to reject any liquidation entirely.
-
-    The old SL-proximity gate (leverage × sl_distance_pct) has been removed.
-    It produced false rejections on valid high-leverage trials. Monthly
-    liquidation cap is sufficient — if a trial actually gets liquidated
-    too often, it fails here naturally.
 
     Args:
         result: BacktestResult with .trades list
@@ -498,9 +493,14 @@ def check_liquidation_safety(
             if ts is not None:
                 try:
                     import pandas as pd
-                    month_key = pd.Timestamp(ts).strftime('%Y-%m')
+                    month_key = pd.Timestamp(ts, unit='ms').strftime('%Y-%m')
                 except Exception:
-                    month_key = str(ts)[:7]
+                    # Fallback: try treating as seconds, then as raw string
+                    try:
+                        import pandas as pd
+                        month_key = pd.Timestamp(ts, unit='s').strftime('%Y-%m')
+                    except Exception:
+                        month_key = str(ts)[:7]
                 liq_by_month[month_key] += 1
             else:
                 liq_by_month[f'unknown_{id(trade)}'] += 1
@@ -521,7 +521,7 @@ def diagnose_rejection(result, max_liq_per_month: int = 2) -> str:
     Returns a human-readable string with the rejection reason, or 'PASS' if
     it would not be rejected.
     """
-    # Liquidation gate — monthly cap only (SL-proximity gate removed)
+    # Liquidation gate — monthly cap only
     if hasattr(result, 'trades'):
         from collections import defaultdict
         liq_by_month = defaultdict(int)
@@ -531,9 +531,13 @@ def diagnose_rejection(result, max_liq_per_month: int = 2) -> str:
                 if ts is not None:
                     try:
                         import pandas as pd
-                        mk = pd.Timestamp(ts).strftime('%Y-%m')
+                        mk = pd.Timestamp(ts, unit='ms').strftime('%Y-%m')
                     except Exception:
-                        mk = str(ts)[:7]
+                        try:
+                            import pandas as pd
+                            mk = pd.Timestamp(ts, unit='s').strftime('%Y-%m')
+                        except Exception:
+                            mk = str(ts)[:7]
                     liq_by_month[mk] += 1
                 else:
                     liq_by_month[f'unknown_{id(t)}'] += 1
@@ -583,7 +587,7 @@ def apply_liquidation_gate(objective_fn, max_liq_per_month: int = 2):
     Args:
         objective_fn: The objective function to wrap
         max_liq_per_month: Max liquidations per calendar month
-                           (0 = zero tolerance, 1 = one tolerated, etc.)
+                           (0 = zero tolerance, 2 = up to two tolerated)
     """
 
     def wrapped(result) -> float:
