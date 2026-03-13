@@ -49,6 +49,15 @@ def get_strategy(name: str):
     elif name in ('cybercyclev3','ccv3','cyberv3'):
         from strategies.cybercyclev3 import CyberCycleStrategyv3
         return CyberCycleStrategyv3()
+    elif name in ('cybercyclehtf','cchtf','cyberhtf'):
+        from strategies.cybercyclehtf import CyberCycleStrategyhtf
+        return CyberCycleStrategyhtf()
+    elif name in ('cybercyclev5','ccv5','cyberv5'):
+        from strategies.cybercyclev5 import CyberCycleStrategyv5
+        return CyberCycleStrategyv5()
+    elif name in ('cybercyclev6','ccv6','cyberv6'):
+        from strategies.cybercyclev6 import CyberCycleStrategyv6
+        return CyberCycleStrategyv6()
     else:
         raise ValueError(f"Unknown strategy: {name}. Options: cybercycle, gaussbands, smartmoney")
 

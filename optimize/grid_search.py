@@ -367,7 +367,7 @@ def objective_monthly_robust(result) -> float:
 
     # Drawdown penalty: no penalty ≤15%, linear decay 15%→50%
     dd = abs(result.max_drawdown)
-    dd_factor = 1.0 if dd <= 20 else max(0.2, 1.0 - (dd - 20) / 40.0)
+    dd_factor = 1.0 if dd <= 15 else max(0.2, 1.0 - (dd - 15) / 35.0)
 
     # Profit factor bonus: PF=1.5 → 1.0, PF=3.0 → 1.3
     pf_bonus = min(1.5, result.profit_factor / 2.0) if result.profit_factor > 0 else 0.5
