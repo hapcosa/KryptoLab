@@ -848,3 +848,264 @@ class IncrementalCyberCycleV2(IncrementalCyberCycle):
                 'partial_bar': not commit,
             }
         )
+
+
+class IncrementalCyberCycleV3(IncrementalCyberCycle):
+    """
+    Incremental processor for CyberCycleStrategyv3 (Pine-faithful).
+
+    Confidence weights (exact Pine match, max 100):
+        Cross signal:  20
+        iTrend:        15  (ternary: use_trend ? aligned : true)
+        OB/OS zone:    15
+        Volume:        15  (ternary: use_vol ? volumeOK : true)
+        Fisher:        10
+        Momentum:      10
+        HTF:           15
+
+    Hard gates (AND conditions, separate from confidence):
+        - use_trend → trend alignment required
+        - use_htf   → HTF alignment required
+    """
+
+    def _compute(self, high, low, close, volume, ts, commit) -> Optional[Signal]:
+        i = self._bar
+        hl2 = (high + low) / 2.0
+
+        # ── 1. Alpha ──
+        alpha, period = (self._alpha.update(hl2) if commit
+                         else self._alpha.update_partial(hl2))
+        floor = self.p.get('alpha_floor', 0.0)
+        if floor > 0:
+            alpha = max(alpha, floor)
+
+        # ── 2. CyberCycle ──
+        self._src.push(hl2)
+        s0, s1, s2, s3 = (self._src.ago(k) for k in range(4))
+        sm = (s0 + 2 * s1 + 2 * s2 + s3) / 6.0
+        self._sm.push(sm)
+        if i < 7:
+            cyc = (s0 - 2 * s1 + s2) / 4.0 if i >= 2 else 0.0
+        else:
+            a = alpha
+            m0, m1, m2 = self._sm.ago(0), self._sm.ago(1), self._sm.ago(2)
+            c1, c2 = self._cyc.ago(0), self._cyc.ago(1)
+            cyc = ((1 - 0.5 * a) ** 2 * (m0 - 2 * m1 + m2)
+                   + 2 * (1 - a) * c1 - (1 - a) ** 2 * c2)
+
+        # ── 3. Trigger (EMA) ──
+        self._pcy = self._cyc.ago(0)
+        self._ptr = self._trig
+        self._cyc.push(cyc)
+        k = self._tk
+        self._trig = cyc if not self._ti else k * cyc + (1 - k) * self._trig
+        self._ti = True
+
+        # ── 4. iTrend ──
+        self._cl.push(close)
+        a = self._ita
+        if i < 3:
+            it = close
+        else:
+            c0, c1c, c2c = self._cl.ago(0), self._cl.ago(1), self._cl.ago(2)
+            t1, t2 = self._it.ago(0), self._it.ago(1)
+            it = ((a - a * a / 4) * c0 + 0.5 * a * a * c1c - (a - 0.75 * a * a) * c2c
+                  + 2 * (1 - a) * t1 - (1 - a) ** 2 * t2)
+        self._it.push(it)
+        bull_t = it > self._it.ago(2) if i >= 2 else False
+        bear_t = it < self._it.ago(2) if i >= 2 else False
+
+        # ── 5. Fisher Transform ──
+        self._cw.push(cyc)
+        fL, fH = self._cw.min_max()
+        fR = fH - fL
+        fV = max(-0.999, min(0.999, 2 * ((cyc - fL) / fR - 0.5) if fR else 0.0))
+        f = 0.5 * math.log((1 + fV) / (1 - fV))
+        fish = 0.5 * f + 0.5 * self._fish
+        fu = fish > self._fish
+        fd = fish < self._fish
+        self._fish = fish
+
+        # ── 6. Volume filter ──
+        self._vb.push(volume)
+        vol_sma = self._vb.mean() if i >= 19 else (self._vb.mean() if i > 0 else volume)
+        vol_ratio = volume / vol_sma if vol_sma > 0 else 0.0
+        use_vol = self.p.get('use_volume', True)
+        vol_mult = self.p.get('volume_mult', 2.0)
+        volume_ok = (not use_vol) or (vol_ratio >= vol_mult)
+
+        # ── 7. ATR ──
+        tr = max(high - low,
+                 abs(high - self._pc) if self._pc > 0 else high - low,
+                 abs(low - self._pc) if self._pc > 0 else high - low)
+        if commit:
+            self._pc = close
+        atr_alpha = 1.0 / 14.0
+        self._atr = tr if self._atrc == 0 else self._atr + atr_alpha * (tr - self._atr)
+        if commit:
+            self._atrc += 1
+        atr = self._atr
+
+        # ── 8. HTF filter (incremental EMA proxy) ──
+        # Pine: request.security("240", hl2) vs ema(close, 10) on 4H
+        # Incremental: we use longer-period EMAs as proxy for HTF:
+        #   htf_src ≈ EMA(hl2, 4)  smoothed to approximate 4H hl2
+        #   htf_cc  ≈ EMA(close, 40)  approximating EMA(close_4h, 10)
+        # Note: The vectorized path uses REAL 4H resampling.
+        # This incremental proxy is less accurate but follows the same
+        # directional logic.
+        use_htf = self.p.get('use_htf', True)
+        htf_alpha_src = 2.0 / (5.0)  # ~ 4-bar smoothing of hl2
+        htf_alpha_cc = 2.0 / (41.0)  # ~ 40-bar EMA of close (≈ 4H EMA(10))
+        self._htfs = hl2 if i == 0 else self._htfs + htf_alpha_src * (hl2 - self._htfs)
+        self._htfc = close if i == 0 else self._htfc + htf_alpha_cc * (close - self._htfc)
+
+        htf_bullish = (not use_htf) or (self._htfs > self._htfc)
+        htf_bearish = (not use_htf) or (self._htfs < self._htfc)
+
+        # ── 9. Crossover detection ──
+        bull_cross = (self._pcy <= self._ptr) and (cyc > self._trig) and i > 1
+        bear_cross = (self._pcy >= self._ptr) and (cyc < self._trig) and i > 1
+
+        if not (bull_cross or bear_cross):
+            if commit:
+                self._bar += 1
+            return None
+
+        # Bar throttle
+        min_bars = self.p.get('min_bars', 24)
+        if i - self._lsb < min_bars:
+            if commit:
+                self._bar += 1
+            return None
+
+        is_buy = bull_cross
+        use_trend = self.p.get('use_trend', True)
+
+        # ── OB/OS zones ──
+        ob = self.p.get('ob_level', 1.5)
+        os_lev = self.p.get('os_level', -1.5)
+        in_ob = cyc > ob
+        in_os = cyc < os_lev
+
+        # ── Momentum ──
+        mom3_pos = (cyc - self._cyc.ago(3)) > 0 if i >= 3 else False
+        mom3_neg = (cyc - self._cyc.ago(3)) < 0 if i >= 3 else False
+
+        # ══════════════════════════════════════════════════════════
+        #  CONFIDENCE — Exact Pine weights (max 100)
+        # ══════════════════════════════════════════════════════════
+        conf = 0.0
+        if is_buy:
+            conf += 20.0 if bull_cross else 0.0
+            conf += 15.0 if (bull_t if use_trend else True) else 0.0
+            conf += 15.0 if in_os else 0.0
+            conf += 15.0 if (volume_ok if use_vol else True) else 0.0
+            conf += 10.0 if fu else 0.0
+            conf += 10.0 if mom3_pos else 0.0
+            conf += 15.0 if htf_bullish else 0.0
+        else:
+            conf += 20.0 if bear_cross else 0.0
+            conf += 15.0 if (bear_t if use_trend else True) else 0.0
+            conf += 15.0 if in_ob else 0.0
+            conf += 15.0 if (volume_ok if use_vol else True) else 0.0
+            conf += 10.0 if fd else 0.0
+            conf += 10.0 if mom3_neg else 0.0
+            conf += 15.0 if htf_bearish else 0.0
+
+        conf = min(conf, 100.0)
+
+        # ── Confidence gate ──
+        if conf < self.p.get('confidence_min', 80.0):
+            if commit:
+                self._bar += 1
+            return None
+
+        # ══════════════════════════════════════════════════════════
+        #  HARD GATES — AND conditions separate from confidence
+        # ══════════════════════════════════════════════════════════
+        # Pine: and (eUseTrend ? bullTrend : true)
+        if use_trend:
+            if is_buy and not bull_t:
+                if commit:
+                    self._bar += 1
+                return None
+            if not is_buy and not bear_t:
+                if commit:
+                    self._bar += 1
+                return None
+
+        # Pine: and htfAlignBuy / htfAlignSell
+        if is_buy and not htf_bullish:
+            if commit:
+                self._bar += 1
+            return None
+        if not is_buy and not htf_bearish:
+            if commit:
+                self._bar += 1
+            return None
+
+        # ── Daily cap ──
+        max_daily = self.p.get('max_signals_per_day', 0)
+        if max_daily > 0:
+            day = ts // 86400000
+            if day != self._cd:
+                self._cd = day
+                self._dc = 0
+            if self._dc >= max_daily:
+                if commit:
+                    self._bar += 1
+                return None
+            self._dc += 1
+
+        self._lsb = i
+
+        # ── Build Signal ──
+        direction = 1 if is_buy else -1
+        entry = close
+
+        if self.p.get('sltp_type', 'slatr_tprr') == 'sltp_fixed':
+            sl_d = entry * (1 - direction * self.p.get('sl_fixed_pct', 2.5) / 100)
+            tp1 = entry * (1 + direction * self.p.get('tp1_fixed_pct', 3.0) / 100)
+            tp2 = entry * (1 + direction * self.p.get('tp2_fixed_pct', 4.5) / 100)
+            tp1s = self.p.get('tp1_fixed_size', 0.6)
+            sld = abs(entry - sl_d)
+        else:
+            sld = atr * self.p.get('sl_atr_mult', 1.5)
+            sl_d = entry - direction * sld
+            tp1s = self.p.get('tp1_size', 0.6)
+            tp1 = entry + direction * sld * self.p.get('tp1_rr', 2.0)
+            tp2 = entry + direction * sld * self.p.get('tp2_rr', 3.0)
+
+        tp2s = round(1.0 - tp1s, 8)
+        be_pct = self.p.get('be_pct', 1.5)
+        be_t = entry * (1 + direction * be_pct / 100) if be_pct > 0 else 0.0
+        utl = self.p.get('use_trailing', True)
+        tpull = self.p.get('trail_pullback_pct', 1.0)
+        tdist = entry * (tpull / 100) if utl else 0.0
+
+        if utl:
+            tact = entry * (1 + direction * self.p.get('trail_activate_pct', 2.0) / 100)
+            be_t = be_t if (be_pct > 0 and abs(be_t - entry) <= abs(tact - entry)) else tact
+
+        if commit:
+            self._bar += 1
+
+        return Signal(
+            direction=direction, confidence=conf,
+            entry_price=entry, sl_price=sl_d,
+            tp_levels=[tp1, tp2], tp_sizes=[tp1s, tp2s],
+            leverage=self.p.get('leverage', 3.0),
+            be_trigger=be_t, trailing=utl, trailing_distance=tdist,
+            metadata={
+                'close_on_signal': self.p.get('close_on_signal', True),
+                'max_signals_per_day': max_daily,
+                'alpha_method': self.p.get('alpha_method', 'kalman'),
+                'alpha': alpha, 'period': period,
+                'cycle': cyc, 'fisher': fish,
+                'sl_dist_atr': sld / atr if atr > 0 else 0,
+                'tp1': tp1, 'tp2': tp2,
+                'be_pct': be_pct, 'trail_pct': tpull if utl else 0,
+                'partial_bar': not commit,
+            }
+        )
