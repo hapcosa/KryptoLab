@@ -360,7 +360,15 @@ class IncrementalCyberCycle:
         self._fish  = 0.0
         self._atr   = 0.0;  self._atrc = 0;  self._pc = 0.0
         self._vs    = 0.0
-        self._htfs  = 0.0;  self._htfc = 0.0; self._htk = 2.0/41.0
+        self._htf_bar = -1  # Current HTF bar index (ts_sec // htf_sec)
+        self._htf_prev_hl2 = 0.0  # hl2 at close of previous HTF bar
+        self._htf_prev_close = 0.0  # close at close of previous HTF bar
+        self._htf_cur_hl2 = 0.0  # running hl2 of current HTF bar
+        self._htf_cur_close = 0.0  # running close of current HTF bar
+        # Legacy EMA fields (kept for snapshot compat, non-critical)
+        self._htfs = 0.0;
+        self._htfc = 0.0;
+        self._htk = 2.0 / 41.0
         self._pcy   = 0.0;  self._ptr  = 0.0
         self._csi   = False
         self._bar   = 0;    self._lsb  = -9999
@@ -378,7 +386,12 @@ class IncrementalCyberCycle:
             'vb':  self._vb.snapshot(),  'ab':  self._ab.snapshot(),
             'trig':self._trig, 'ti':self._ti, 'fish':self._fish,
             'atr': self._atr, 'atrc':self._atrc, 'pc':self._pc,
-            'vs':  self._vs, 'htfs':self._htfs, 'htfc':self._htfc,
+            'vs':  self._vs,             'htfs':self._htfs, 'htfc':self._htfc,
+            'htf_bar':self._htf_bar,
+            'htf_prev_hl2':self._htf_prev_hl2,
+            'htf_prev_close':self._htf_prev_close,
+            'htf_cur_hl2':self._htf_cur_hl2,
+            'htf_cur_close':self._htf_cur_close,
             'pcy': self._pcy, 'ptr':self._ptr, 'csi':self._csi,
             'bar': self._bar, 'lsb':self._lsb, 'dc':self._dc, 'cd':self._cd,
         }
@@ -390,7 +403,12 @@ class IncrementalCyberCycle:
         self._vb.restore(s['vb']);   self._ab.restore(s['ab'])
         self._trig=s['trig']; self._ti=s['ti'];   self._fish=s['fish']
         self._atr=s['atr'];   self._atrc=s['atrc']; self._pc=s['pc']
-        self._vs=s['vs'];     self._htfs=s['htfs']; self._htfc=s['htfc']
+        self._vs=s['vs'];             self._htfs=s['htfs']; self._htfc=s['htfc']
+        self._htf_bar=s.get('htf_bar', -1)
+        self._htf_prev_hl2=s.get('htf_prev_hl2', 0.0)
+        self._htf_prev_close=s.get('htf_prev_close', 0.0)
+        self._htf_cur_hl2=s.get('htf_cur_hl2', 0.0)
+        self._htf_cur_close=s.get('htf_cur_close', 0.0)
         self._pcy=s['pcy'];   self._ptr=s['ptr'];   self._csi=s['csi']
         self._bar=s['bar'];   self._lsb=s['lsb']
         self._dc=s['dc'];     self._cd=s['cd']
@@ -468,12 +486,50 @@ class IncrementalCyberCycle:
         vol_ok  = (not use_vol) or (volume/vsma >= self.p.get('volume_mult', 2.0) if vsma > 0 else True)
 
         # 8. HTF EMA
+        # 8. HTF filter — real timestamp-based resample (no EMA proxy)
+        #    Replica la lógica de htf_resample() de forma incremental:
+        #    divide timestamp por htf_seconds para detectar cambios de barra HTF.
+        #    Al cambiar la barra HTF, toma los valores de cierre de la barra anterior.
+        use_htf = self.p.get('use_htf', False)
+        if use_htf and ts > 0:
+            # Determine HTF seconds from params
+            htf_sec = self.p.get('_htf_seconds', 14400)
+
+            # ts puede estar en milisegundos o segundos
+            ts_sec = ts // 1000 if ts > 1_000_000_000_000 else ts
+            cur_htf_bar = ts_sec // htf_sec
+
+            if self._htf_bar < 0:
+                # Primera barra — inicializar todo
+                self._htf_bar = cur_htf_bar
+                self._htf_cur_hl2 = hl2
+                self._htf_cur_close = close
+                self._htf_prev_hl2 = hl2
+                self._htf_prev_close = close
+            elif cur_htf_bar != self._htf_bar:
+                # Cambio de barra HTF — los valores del período anterior
+                # se convierten en la referencia (sin future leak)
+                self._htf_prev_hl2 = self._htf_cur_hl2
+                self._htf_prev_close = self._htf_cur_close
+                self._htf_bar = cur_htf_bar
+                self._htf_cur_hl2 = hl2
+                self._htf_cur_close = close
+            else:
+                # Misma barra HTF — actualizar valores corrientes
+                self._htf_cur_hl2 = hl2
+                self._htf_cur_close = close
+
+            # Filtro: comparar hl2 vs close de la barra HTF ANTERIOR
+            htf_buy = self._htf_prev_hl2 > self._htf_prev_close
+            htf_sell = self._htf_prev_hl2 < self._htf_prev_close
+        else:
+            htf_buy = True
+            htf_sell = True
+
+        # Mantener EMA legacy para backward compat (no afecta señales)
         hk = self._htk
-        self._htfs  = hk*hl2   + (1-hk)*self._htfs
-        self._htfc  = hk*close + (1-hk)*self._htfc
-        use_htf  = self.p.get('use_htf', False)
-        htf_buy  = (not use_htf) or (self._htfs > self._htfc)
-        htf_sell = (not use_htf) or (self._htfs < self._htfc)
+        self._htfs = hk * hl2 + (1 - hk) * self._htfs
+        self._htfc = hk * close + (1 - hk) * self._htfc
 
         # 9. OB/OS
         in_ob = cyc >  self.p.get('ob_level',  1.5)
@@ -758,7 +814,50 @@ class IncrementalCyberCycleV2(IncrementalCyberCycle):
         # 9. Crossover — same as parent
         bull_x = (self._pcy <= self._ptr) and (cyc > self._trig)
         bear_x = (self._pcy >= self._ptr) and (cyc < self._trig)
+        # 8. HTF filter — real timestamp-based resample (no EMA proxy)
+        #    Replica la lógica de htf_resample() de forma incremental:
+        #    divide timestamp por htf_seconds para detectar cambios de barra HTF.
+        #    Al cambiar la barra HTF, toma los valores de cierre de la barra anterior.
+        use_htf = self.p.get('use_htf', False)
+        if use_htf and ts > 0:
+            # Determine HTF seconds from params
+            htf_sec = self.p.get('_htf_seconds', 14400)
 
+            # ts puede estar en milisegundos o segundos
+            ts_sec = ts // 1000 if ts > 1_000_000_000_000 else ts
+            cur_htf_bar = ts_sec // htf_sec
+
+            if self._htf_bar < 0:
+                # Primera barra — inicializar todo
+                self._htf_bar = cur_htf_bar
+                self._htf_cur_hl2 = hl2
+                self._htf_cur_close = close
+                self._htf_prev_hl2 = hl2
+                self._htf_prev_close = close
+            elif cur_htf_bar != self._htf_bar:
+                # Cambio de barra HTF — los valores del período anterior
+                # se convierten en la referencia (sin future leak)
+                self._htf_prev_hl2 = self._htf_cur_hl2
+                self._htf_prev_close = self._htf_cur_close
+                self._htf_bar = cur_htf_bar
+                self._htf_cur_hl2 = hl2
+                self._htf_cur_close = close
+            else:
+                # Misma barra HTF — actualizar valores corrientes
+                self._htf_cur_hl2 = hl2
+                self._htf_cur_close = close
+
+            # Filtro: comparar hl2 vs close de la barra HTF ANTERIOR
+            htf_buy = self._htf_prev_hl2 > self._htf_prev_close
+            htf_sell = self._htf_prev_hl2 < self._htf_prev_close
+        else:
+            htf_buy = True
+            htf_sell = True
+
+        # Mantener EMA legacy para backward compat (no afecta señales)
+        hk = self._htk
+        self._htfs = hk * hl2 + (1 - hk) * self._htfs
+        self._htfc = hk * close + (1 - hk) * self._htfc
         if commit: self._bar += 1
 
         # ── Signal gates ──

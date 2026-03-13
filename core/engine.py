@@ -201,7 +201,7 @@ class BacktestEngine:
             self._tf_detail = TimeframeDetail(
                 data['timestamp'], self._detail_data, timeframe
             )
-
+        data['_timeframe'] = timeframe  # Para que la estrategia sepa su TF base
         # Pre-calculate all indicators
         indicators = strategy.calculate_indicators(data)
 

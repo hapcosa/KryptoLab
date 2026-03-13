@@ -182,3 +182,52 @@ def htf_resample(src: np.ndarray, timestamps: np.ndarray,
         out[i] = current_htf_val
     
     return out
+
+
+HTF_AUTO_MAP = {
+    # base_tf → htf_seconds (el HTF natural para cada TF)
+    '1m': 300,  # 1m  → 5m    (5× ratio)
+    '3m': 900,  # 3m  → 15m   (5× ratio)
+    '5m': 3600,  # 5m  → 1H    (12× ratio)
+    '15m': 3600,  # 15m → 1H    (4× ratio)
+    '30m': 14400,  # 30m → 4H    (8× ratio)
+    '1h': 14400,  # 1H  → 4H    (4× ratio)  ← el más común
+    '2h': 14400,  # 2H  → 4H    (2× ratio)
+    '4h': 86400,  # 4H  → 1D    (6× ratio)  ← el más común
+    '6h': 86400,  # 6H  → 1D    (4× ratio)
+    '12h': 604800,  # 12H → 1W    (14× ratio)
+    '1d': 604800,  # 1D  → 1W    (7× ratio)
+}
+
+HTF_SECONDS_MAP = {
+    '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+    '1h': 3600, '2h': 7200, '4h': 14400, '6h': 21600,
+    '12h': 43200, '1d': 86400, '1w': 604800,
+}
+
+
+def get_htf_seconds(base_tf: str, htf_override: str = 'auto') -> int:
+    """
+    Determina los segundos del HTF dado un timeframe base.
+
+    Args:
+        base_tf:      Timeframe base ('1h', '4h', '1d', etc.)
+        htf_override: 'auto' para mapeo automático, o un TF explícito ('4h', '1d')
+
+    Returns:
+        Segundos del HTF (ej: 14400 para 4H)
+
+    Ejemplo:
+        get_htf_seconds('1h')           → 14400  (4H automático)
+        get_htf_seconds('4h')           → 86400  (1D automático)
+        get_htf_seconds('1h', '1d')     → 86400  (override manual a 1D)
+        get_htf_seconds('4h', '4h')     → 86400  (4h≤4h → fallback a auto=1D)
+    """
+    if htf_override != 'auto' and htf_override in HTF_SECONDS_MAP:
+        htf_sec = HTF_SECONDS_MAP[htf_override]
+        base_sec = HTF_SECONDS_MAP.get(base_tf, 3600)
+        if htf_sec <= base_sec:
+            # HTF debe ser estrictamente mayor que base TF
+            return HTF_AUTO_MAP.get(base_tf, 14400)
+        return htf_sec
+    return HTF_AUTO_MAP.get(base_tf, 14400)

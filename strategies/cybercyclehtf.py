@@ -141,7 +141,7 @@ class CyberCycleStrategyhtf(IStrategy):
         return [
             # ═══ ALPHA METHOD — all 5 methods ═══
             ParamDef('alpha_method', 'categorical', 'kalman',
-                     options=[ 'autocorrelation', 'kalman', 'manual']),
+                     options=['kalman', 'manual']),
             ParamDef('manual_alpha', 'float', 0.42, 0.05, 0.80, 0.01),
             ParamDef('alpha_floor', 'float', 0.0, 0.0, 0.50, 0.01),
 
@@ -453,6 +453,13 @@ class CyberCycleStrategyhtf(IStrategy):
         )
 
     def create_incremental_processor(self, detail_tf_ratio: int = 60):
-        """Create incremental processor for IntrabarBacktestEngine."""
-        from indicators.incremental_ehlers import IncrementalCyberCycleV3
-        return IncrementalCyberCycleV3(self.params, detail_tf_ratio=detail_tf_ratio)
+        from indicators.incremental_ehlers import IncrementalCyberCycleV2
+        from indicators.common import get_htf_seconds
+        # Inyectar htf_seconds calculado para que el processor incremental
+        # pueda hacer el tracking por timestamp sin necesitar el data dict
+        params = dict(self.params)
+        if params.get('use_htf', True):
+            base_tf = params.get('_base_tf', '1h')
+            htf_tf = params.get('htf_timeframe', 'auto')
+            params['_htf_seconds'] = get_htf_seconds(base_tf, htf_tf)
+        return IncrementalCyberCycleV2(params, detail_tf_ratio=detail_tf_ratio)
