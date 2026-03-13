@@ -141,17 +141,10 @@ class CyberCycleStrategyhtf(IStrategy):
         return [
             # ═══ ALPHA METHOD — all 5 methods ═══
             ParamDef('alpha_method', 'categorical', 'kalman',
-                     options=['homodyne', 'mama', 'autocorrelation', 'kalman', 'manual']),
+                     options=[ 'autocorrelation', 'kalman', 'manual']),
             ParamDef('manual_alpha', 'float', 0.42, 0.05, 0.80, 0.01),
             ParamDef('alpha_floor', 'float', 0.0, 0.0, 0.50, 0.01),
 
-            # Homodyne
-            ParamDef('hd_min_period', 'float', 3.0, 2.0, 10.0, 1.0),
-            ParamDef('hd_max_period', 'float', 40.0, 15.0, 80.0, 5.0),
-
-            # MAMA — see note below on saturation behavior
-            ParamDef('mama_fast', 'float', 0.5, 0.2, 0.8, 0.05),
-            ParamDef('mama_slow', 'float', 0.05, 0.01, 0.2, 0.01),
 
             # Autocorrelation
             ParamDef('ac_min_period', 'int', 6, 3, 15),
