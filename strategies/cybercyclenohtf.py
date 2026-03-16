@@ -1,47 +1,43 @@
 """
-CryptoLab — CyberCycle v6.2 Pine-Parity Strategy
+CryptoLab — CyberCycle NoHTF (Pine-Parity)
 
-Maximum parity with cybercycle_v62.pine (TradingView).
-
-═══════════════════════════════════════════════════════════════
- CAMBIOS vs cybercyclev3.py original:
-═══════════════════════════════════════════════════════════════
-
- 1. ELIMINADOS Homodyne, MAMA, Autocorrelation
-    → Solo Kalman + Manual (los únicos que pasan gates)
-    → Reduce espacio de búsqueda de 35 a ~22 params efectivos
-    → 4x menos CPU en calculate_indicators()
-
- 2. HTF FILTER CORREGIDO — usa htf_resample() real
-    → Antes: ema(src, 40) vs ema(close, 40) — proxy falso
-    → Ahora: htf_resample(hl2, ts, 14400) vs htf_resample(ema10, ts, 14400)
-    → Replica Pine: request.security("240", hl2) vs request.security("240", ema(close,10))
-    → Requiere timestamps en data['timestamp'] (epoch ms)
-
- 3. CONFIDENCE WEIGHTS = Pine EXACTO (20/15/15/15/10/10/15)
-    → Cross: 20, iTrend: 15, OB/OS: 15, Volume: 15,
-      Fisher: 10, Momentum: 10, HTF: 15 = 100
-    → Antes v3 tenía pesos redistribuidos (25/15/15/15/10/10 = 110)
-
- 4. HARD TREND FILTER post-confidence (como Pine)
-    → Pine: buySignal = bullCross AND buyConf >= minConf AND barFilter
-            AND (eUseTrend ? bullTrend : true) AND htfAlignBuy
-    → Es un AND separado, NO parte del confidence scoring
-    → Antes: trend solo sumaba pts, no era gate obligatorio
-
- 5. ENTRY PRICE = hl2 en histórico (como Pine)
-    → Pine captura srcCyber (=hl2) en barstate.ishistory, close en realtime
-    → Para backtest histórico, hl2 es la paridad correcta
+Maximum parity with "Ehlers Cyber Cycle SIGNALS" PineScript.
 
 ═══════════════════════════════════════════════════════════════
+ ORIGEN: Ehlers Cyber Cycle SIGNALS (overlay, sin HTF)
+═══════════════════════════════════════════════════════════════
 
-Filtros activos:
-- 2 alpha methods: Kalman + Manual
-- iTrend filter
-- Fisher Transform
-- Volume filter
-- HTF 4H filter (htf_resample real)
-- Confidence scoring system (0-100) — pesos idénticos a Pine
+ CONFIDENCE WEIGHTS — Pine-exact (f_confidence):
+    Cross signal:  25  — bullCross / bearCross
+    iTrend:        20  — trend alignment
+    OB/OS zone:    20  — oversold (buy) / overbought (sell)
+    Volume:        15  — volume confirmation
+    Fisher:        10  — Fisher transform direction
+    Momentum:      10  — 3-bar cycle momentum
+    ───────────────────
+    Total max:    100  (SIN HTF)
+
+ SIGNAL LOGIC — Pine-exact:
+    buySignal = bullCross
+                AND buyConf >= minConf
+                AND barFilter
+                AND ((useTrendFilter AND bullTrend) OR NOT useTrendFilter)
+
+ DIFERENCIAS vs cybercyclev3.py (Pine-Parity con HTF):
+    - Sin HTF filter (ni en confidence ni como hard gate)
+    - Pesos de confianza distintos: 25/20/20/15/10/10 vs 20/15/15/15/10/10/15
+    - Cross vale 25 pts (vs 20 en v6.2 con HTF)
+    - iTrend vale 20 pts (vs 15 en v6.2 con HTF)
+    - OB/OS vale 20 pts (vs 15 en v6.2 con HTF)
+
+ RISK MANAGEMENT — idéntico a cybercyclev3.py:
+    - Dual SL/TP: slatr_tprr | sltp_fixed
+    - Break-even con be_pct
+    - Trailing stop con activación + pullback
+    - close_on_signal, max_signals_per_day
+
+ ALPHA METHODS — solo Kalman + Manual (los que pasan gates)
+═══════════════════════════════════════════════════════════════
 """
 import numpy as np
 from typing import Optional, List, Dict, Any
@@ -51,26 +47,25 @@ from indicators.ehlers import (
     kalman_alpha, cybercycle, itrend, fisher_transform,
 )
 from indicators.common import (
-    ema, sma, atr, crossover, crossunder, volume_ratio, htf_resample,
+    ema, sma, atr, crossover, crossunder, volume_ratio,
 )
 
 
 # ═══════════════════════════════════════════════════════════════
-#  CONFIDENCE — Pine-exact weights (lines 706-725 of .pine)
+#  CONFIDENCE — Pine-exact weights (no HTF)
 #
-#  buyConf:
-#    bullCross                        → 20
-#    (eUseTrend ? bullTrend : true)   → 15
-#    inOS                             → 15
-#    (eUseVol ? volumeOK : true)      → 15
-#    fishRising                       → 10
-#    momentum3 > 0                    → 10
-#    htfAlignBuy                      → 15
-#                                     ────
-#                              total: 100
+#  Pine f_confidence(isBuy):
+#    bullCross                                          → 25
+#    (useTrendFilter and bullTrend) or not useTrendFilter → 20
+#    inOversold                                          → 20
+#    volumeOK                                            → 15
+#    fisher > fisherPrev                                 → 10
+#    momentum > 0                                        → 10
+#                                                        ────
+#                                                 total: 100
 # ═══════════════════════════════════════════════════════════════
 
-def compute_confidence_pine(
+def compute_confidence_nohtf(
     is_buy: bool,
     bull_cross: bool, bear_cross: bool,
     bull_trend: bool, bear_trend: bool,
@@ -78,49 +73,45 @@ def compute_confidence_pine(
     volume_ok: bool,
     fish_rising: bool, fish_falling: bool,
     momentum_positive: bool, momentum_negative: bool,
-    htf_align_buy: bool, htf_align_sell: bool,
     use_trend: bool, use_vol: bool,
 ) -> float:
     """
-    Confidence scoring — identical to cybercycle_v62.pine.
+    Confidence scoring — identical to "Ehlers Cyber Cycle SIGNALS" Pine.
 
-    Each component contributes a fixed amount:
-        Cross signal:  20  — cycle × trigger crossover detected
-        iTrend:        15  — trend alignment
-        OB/OS zone:    15  — oversold (buy) / overbought (sell)
+    NO HTF component. Weights redistributed:
+        Cross signal:  25  — cycle × trigger crossover detected
+        iTrend:        20  — trend alignment
+        OB/OS zone:    20  — oversold (buy) / overbought (sell)
         Volume:        15  — volume confirmation
         Fisher:        10  — Fisher transform direction
         Momentum:      10  — 3-bar cycle momentum
-        HTF:           15  — higher timeframe alignment
         ───────────────────
         Total max:    100
     """
     conf = 0.0
 
     if is_buy:
-        conf += 20.0 if bull_cross else 0.0
-        conf += 15.0 if (bull_trend if use_trend else True) else 0.0
-        conf += 15.0 if in_os else 0.0
+        conf += 25.0 if bull_cross else 0.0
+        conf += 20.0 if (bull_trend if use_trend else True) else 0.0
+        conf += 20.0 if in_os else 0.0
         conf += 15.0 if (volume_ok if use_vol else True) else 0.0
         conf += 10.0 if fish_rising else 0.0
         conf += 10.0 if momentum_positive else 0.0
-        conf += 15.0 if htf_align_buy else 0.0
     else:
-        conf += 20.0 if bear_cross else 0.0
-        conf += 15.0 if (bear_trend if use_trend else True) else 0.0
-        conf += 15.0 if in_ob else 0.0
+        conf += 25.0 if bear_cross else 0.0
+        conf += 20.0 if (bear_trend if use_trend else True) else 0.0
+        conf += 20.0 if in_ob else 0.0
         conf += 15.0 if (volume_ok if use_vol else True) else 0.0
         conf += 10.0 if fish_falling else 0.0
         conf += 10.0 if momentum_negative else 0.0
-        conf += 15.0 if htf_align_sell else 0.0
 
     return min(conf, 100.0)
 
 
-class CyberCycleStrategyv3(IStrategy):
+class CyberCycleNoHTFStrategy(IStrategy):
 
     def name(self) -> str:
-        return "CyberCycle v6.2 Pine-Parity"
+        return "CyberCycle NoHTF"
 
     def parameter_defs(self) -> List[ParamDef]:
         return [
@@ -149,7 +140,6 @@ class CyberCycleStrategyv3(IStrategy):
             ParamDef('use_trend', 'bool', True),
             ParamDef('use_volume', 'bool', True),
             ParamDef('volume_mult', 'float', 1.5, 0.5, 5.0, 0.1),
-            ParamDef('use_htf', 'bool', True),
 
             # ── SL/TP mode ───────────────────────────────────────
             ParamDef('sltp_type', 'categorical', 'sltp_fixed',
@@ -187,10 +177,9 @@ class CyberCycleStrategyv3(IStrategy):
 
     def calculate_indicators(self, data: dict) -> dict:
         """
-        Calculate all CyberCycle indicators.
+        Calculate all CyberCycle indicators — sin HTF.
 
-        Solo computa el alpha method seleccionado (Kalman o Manual).
-        HTF filter usa htf_resample() real con timestamps.
+        Solo computa Kalman o Manual alpha.
         """
         src = data['hl2']
         close = data['close']
@@ -199,7 +188,7 @@ class CyberCycleStrategyv3(IStrategy):
 
         method = self.get_param('alpha_method', 'kalman')
 
-        # ── Alpha: solo el seleccionado (no los 4) ──────────────
+        # ── Alpha: solo el seleccionado ─────────────────────────
         if method == 'kalman':
             alpha, period = kalman_alpha(
                 src,
@@ -210,7 +199,7 @@ class CyberCycleStrategyv3(IStrategy):
                 self.get_param('kal_sensitivity', 2.0),
             )
         else:  # manual
-            manual_a = self.get_param('manual_alpha', 0.42)
+            manual_a = self.get_param('manual_alpha', 0.07)
             alpha = np.full(n, manual_a)
             period = np.full(n, (2.0 / manual_a) - 1.0)
 
@@ -225,8 +214,8 @@ class CyberCycleStrategyv3(IStrategy):
         # ── Trigger (EMA of cycle) ──────────────────────────────
         trigger = ema(cycle, self.get_param('trigger_ema', 9))
 
-        # ── iTrend ──────────────────────────────────────────────
-        it = itrend(close, self.get_param('itrend_alpha', 0.09))
+        # ── iTrend (Pine usa close, no hl2) ─────────────────────
+        it = itrend(close, self.get_param('itrend_alpha', 0.07))
         bull_trend = np.zeros(n, dtype=bool)
         bear_trend = np.zeros(n, dtype=bool)
         for i in range(2, n):
@@ -243,7 +232,7 @@ class CyberCycleStrategyv3(IStrategy):
 
         # ── Volume filter ───────────────────────────────────────
         vol_rat = volume_ratio(vol, 20)
-        vol_mult = self.get_param('volume_mult', 1.5)
+        vol_mult = self.get_param('volume_mult', 1.2)
         use_vol_flag = self.get_param('use_volume', True)
         volume_ok = (~use_vol_flag) | (vol_rat >= vol_mult)
 
@@ -265,46 +254,6 @@ class CyberCycleStrategyv3(IStrategy):
         # ── ATR for SL/TP ───────────────────────────────────────
         atr_vals = atr(data['high'], data['low'], close, 14)
 
-        # ════════════════════════════════════════════════════════
-        #  HTF FILTER — Pine-parity con htf_resample()
-        #
-        #  Pine:
-        #    htfSrc = request.security(syminfo.tickerid, "240", hl2)
-        #    htfCC  = request.security(syminfo.tickerid, "240", ta.ema(close,10))
-        #    htfBullish = htfSrc > htfCC
-        #
-        #  Python equivalente:
-        #    1. Resample hl2 al cierre del bar 4H anterior
-        #    2. Resample ema(close,10) al cierre del bar 4H anterior
-        #    3. Comparar sin future leak
-        # ════════════════════════════════════════════════════════
-        use_htf = self.get_param('use_htf', True)
-
-        if use_htf and 'timestamp' in data and data['timestamp'] is not None:
-            ts = data['timestamp']
-
-            # Pine: request.security("240", hl2, lookahead=off)
-            # → valor de hl2 al cierre del último bar 4H completado
-            htf_src = htf_resample(src, ts, 14400)
-
-            # Pine: request.security("240", ta.ema(close, 10), lookahead=off)
-            # → EMA(close,10) evaluado en el TF actual, resampleado a 4H
-            ema10_close = ema(close, 10)
-            htf_cc = htf_resample(ema10_close, ts, 14400)
-
-            htf_align_buy = htf_src > htf_cc
-            htf_align_sell = htf_src < htf_cc
-        elif use_htf:
-            # Fallback si no hay timestamps: proxy EMA larga (menos preciso)
-            htf_src_fb = ema(src, 40)
-            htf_cc_fb = ema(close, 40)
-            htf_align_buy = htf_src_fb > htf_cc_fb
-            htf_align_sell = htf_src_fb < htf_cc_fb
-        else:
-            # HTF desactivado → siempre true
-            htf_align_buy = np.ones(n, dtype=bool)
-            htf_align_sell = np.ones(n, dtype=bool)
-
         return {
             'cycle': cycle,
             'trigger': trigger,
@@ -324,9 +273,7 @@ class CyberCycleStrategyv3(IStrategy):
             'in_os': in_os,
             'momentum3': momentum3,
             'atr': atr_vals,
-            'htf_align_buy': htf_align_buy,
-            'htf_align_sell': htf_align_sell,
-            # Diagnostics — solo Kalman + Manual
+            # Diagnostics
             'alpha_kl': alpha if method == 'kalman' else np.full(n, 0.0),
         }
 
@@ -387,7 +334,7 @@ class CyberCycleStrategyv3(IStrategy):
         }
 
     # ─────────────────────────────────────────────────────────────
-    #  SIGNAL GENERATION — Pine-parity
+    #  SIGNAL GENERATION — Pine-parity (no HTF)
     # ─────────────────────────────────────────────────────────────
 
     def generate_signal(self, ind: dict, idx: int,
@@ -395,12 +342,13 @@ class CyberCycleStrategyv3(IStrategy):
         """
         Generate CyberCycle signal at bar idx.
 
-        Pine-exact logic:
+        Pine-exact logic (Ehlers Cyber Cycle SIGNALS):
           buySignal = bullCross
                       AND buyConf >= minConf
                       AND barFilter
-                      AND (eUseTrend ? bullTrend : true)
-                      AND htfAlignBuy
+                      AND ((useTrendFilter AND bullTrend) OR NOT useTrendFilter)
+
+        No HTF filter anywhere.
         """
         if idx < 10:
             return None
@@ -412,7 +360,7 @@ class CyberCycleStrategyv3(IStrategy):
             return None
 
         # ── Bar filter (min_bars between signals) ───────────────
-        min_bars = self.get_param('min_bars', 16)
+        min_bars = self.get_param('min_bars', 5)
         if idx - self._last_signal_bar < min_bars:
             return None
 
@@ -421,9 +369,10 @@ class CyberCycleStrategyv3(IStrategy):
         is_buy = bull_cross
 
         # ═════════════════════════════════════════════════════════
-        #  CONFIDENCE — Pine-exact weights (20/15/15/15/10/10/15)
+        #  CONFIDENCE — Pine-exact weights (25/20/20/15/10/10)
+        #  No HTF component at all.
         # ═════════════════════════════════════════════════════════
-        conf = compute_confidence_pine(
+        conf = compute_confidence_nohtf(
             is_buy=is_buy,
             bull_cross=bull_cross,
             bear_cross=bear_cross,
@@ -436,8 +385,6 @@ class CyberCycleStrategyv3(IStrategy):
             fish_falling=ind['fish_falling'][idx],
             momentum_positive=ind['momentum3'][idx] > 0,
             momentum_negative=ind['momentum3'][idx] < 0,
-            htf_align_buy=ind['htf_align_buy'][idx],
-            htf_align_sell=ind['htf_align_sell'][idx],
             use_trend=use_trend,
             use_vol=use_vol,
         )
@@ -450,23 +397,14 @@ class CyberCycleStrategyv3(IStrategy):
         # ═════════════════════════════════════════════════════════
         #  HARD TREND FILTER — post-confidence, como Pine
         #
-        #  Pine: AND (eUseTrend ? bullTrend : true) AND htfAlignBuy
-        #  Esto es un gate separado del confidence scoring.
-        #  Una señal puede tener conf=100 pero ser rechazada
-        #  si el trend no está alineado.
+        #  Pine: AND ((useTrendFilter AND bullTrend) OR NOT useTrendFilter)
+        #  Separado del confidence scoring — una señal con conf=100
+        #  se rechaza si el trend no está alineado.
         # ═════════════════════════════════════════════════════════
         if use_trend:
             if is_buy and not ind['bull_trend'][idx]:
                 return None
             if not is_buy and not ind['bear_trend'][idx]:
-                return None
-
-        # ── Hard HTF filter — post-confidence, como Pine ────────
-        use_htf = self.get_param('use_htf', True)
-        if use_htf:
-            if is_buy and not ind['htf_align_buy'][idx]:
-                return None
-            if not is_buy and not ind['htf_align_sell'][idx]:
                 return None
 
         # ── Daily signal cap ────────────────────────────────────
@@ -477,7 +415,7 @@ class CyberCycleStrategyv3(IStrategy):
                 if ts is not None and idx < len(ts):
                     day = int(ts[idx]) // 86400000
                 else:
-                    day = idx // 24  # fallback: assume 1h bars
+                    day = idx // 24
                 if day != self._current_day:
                     self._current_day = day
                     self._daily_count = 0
@@ -492,16 +430,7 @@ class CyberCycleStrategyv3(IStrategy):
         self._last_signal_bar = idx
 
         direction = 1 if is_buy else -1
-
-        # ═════════════════════════════════════════════════════════
-        #  ENTRY PRICE = hl2 (Pine-parity para backtest histórico)
-        #
-        #  Pine: capturedBuyPrice = barstate.ishistory ? srcCyber : close
-        #  srcCyber = hl2
-        #  En backtest todo es "history", así que entry = hl2
-        # ═════════════════════════════════════════════════════════
-        entry = data['hl2'][idx]
-
+        entry = data['close'][idx]
         atr_val = ind['atr'][idx]
 
         # ── SL/TP — dual mode ───────────────────────────────────
@@ -569,8 +498,6 @@ class CyberCycleStrategyv3(IStrategy):
                 'be_pct': be_pct,
                 'trail_pct': self.get_param('trail_pullback_pct', 1.0) if use_trailing else 0,
                 'partial_bar': False,
-                'entry_source': 'hl2',
-                'htf_align': bool(ind['htf_align_buy'][idx] if is_buy else ind['htf_align_sell'][idx]),
             }
         )
 
@@ -581,12 +508,10 @@ class CyberCycleStrategyv3(IStrategy):
     def create_incremental_processor(self, detail_tf_ratio: int = 1):
         """
         Create incremental processor for intrabar execution.
-        Uses IncrementalCyberCycleV2 (v6.3 confidence) which is the
-        closest match to this strategy's confidence weights.
-
-        Note: The incremental processor uses its own confidence weights
-        (v6.3: 20/25/20/20/10/5 without HTF) which differ from Pine.
-        For maximum Pine parity, use --no-intrabar (bar-close mode).
+        Uses IncrementalCyberCycleV2 (v6.3 confidence without HTF).
+        Its weights (20/25/20/20/10/5) differ slightly from this
+        strategy's Pine weights (25/20/20/15/10/10).
+        For maximum parity, use --no-intrabar (bar-close mode).
         """
         from indicators.incremental_ehlers import IncrementalCyberCycleV2
 

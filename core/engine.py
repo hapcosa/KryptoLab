@@ -931,20 +931,59 @@ def format_result(result: BacktestResult) -> str:
     return "\n".join(lines)
 
 
-def result_to_dataframe(result: BacktestResult) -> pd.DataFrame:
-    """Convert trades to DataFrame for analysis."""
+def result_to_dataframe(result) -> 'pd.DataFrame':
+    """
+    Convert trades to DataFrame for analysis.
+
+    Includes human-readable entry/exit datetimes (UTC) for
+    direct comparison with TradingView/PineScript signals.
+
+    Columns added vs original:
+      - entry_time_raw : epoch ms (raw timestamp)
+      - exit_time_raw  : epoch ms (raw timestamp)
+      - entry_datetime : 'YYYY-MM-DD HH:MM' UTC
+      - exit_datetime  : 'YYYY-MM-DD HH:MM' UTC
+    """
+    import pandas as pd
+    from datetime import datetime, timezone
+
     if not result.trades:
         return pd.DataFrame()
 
     records = []
     for t in result.trades:
+        # ── Convert epoch → human-readable datetime ──────────
+        entry_dt_str = ''
+        exit_dt_str = ''
+
+        if t.entry_time and t.entry_time > 0:
+            try:
+                # Timestamps can be epoch ms (>1e12) or epoch s
+                entry_s = t.entry_time / 1000 if t.entry_time > 1e12 else t.entry_time
+                entry_dt = datetime.fromtimestamp(entry_s, tz=timezone.utc)
+                entry_dt_str = entry_dt.strftime('%Y-%m-%d %H:%M')
+            except (OSError, ValueError, OverflowError):
+                entry_dt_str = str(t.entry_time)
+
+        if t.exit_time and t.exit_time > 0:
+            try:
+                exit_s = t.exit_time / 1000 if t.exit_time > 1e12 else t.exit_time
+                exit_dt = datetime.fromtimestamp(exit_s, tz=timezone.utc)
+                exit_dt_str = exit_dt.strftime('%Y-%m-%d %H:%M')
+            except (OSError, ValueError, OverflowError):
+                exit_dt_str = str(t.exit_time)
+
         records.append({
             'id': t.id,
             'direction': 'LONG' if t.direction == 1 else 'SHORT',
+            'entry_datetime': entry_dt_str,
+            'exit_datetime': exit_dt_str,
             'entry_price': t.entry_price,
             'exit_price': t.exit_price,
             'entry_bar': t.entry_bar,
             'exit_bar': t.exit_bar,
+            'entry_time_raw': t.entry_time,
+            'exit_time_raw': t.exit_time,
             'size': t.size,
             'leverage': t.leverage,
             'pnl': t.pnl,
