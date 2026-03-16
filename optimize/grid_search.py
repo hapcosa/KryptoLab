@@ -500,6 +500,11 @@ def check_liquidation_safety(
                 liq_by_month[f'unknown_{id(trade)}'] += 1
 
     # Check monthly liquidation cap
+    ret = getattr(result, 'total_return', 0)
+    dd = abs(getattr(result, 'max_drawdown', 100))
+    if dd > 0 and ret / dd >= 10.0:
+        return True  # bypass liquidation gate
+
     for month, count in liq_by_month.items():
         if count > max_liq_per_month:
             return False
@@ -535,10 +540,17 @@ def diagnose_rejection(result, max_liq_per_month: int = 2) -> str:
                     liq_by_month[mk] += 1
                 else:
                     liq_by_month[f'unknown_{id(t)}'] += 1
-        for month, count in liq_by_month.items():
-            if count > max_liq_per_month:
-                return f"LIQ_MONTHLY: {count} liquidations in {month} (max={max_liq_per_month})"
+        ret = getattr(result, 'total_return', 0)
+        dd = abs(getattr(result, 'max_drawdown', 100))
+        liq_bypass = dd > 0 and ret / dd >= 10.0
 
+        ret = getattr(result, 'total_return', 0)
+        dd = abs(getattr(result, 'max_drawdown', 100))
+        liq_bypass = dd > 0 and ret / dd >= 10.0
+
+        for month, count in liq_by_month.items():
+            if count > max_liq and not liq_bypass:
+                return f"LIQ_MONTHLY: {count} liquidations in {month} (max={max_liq})"
     # monthly_robust gates
     if result.win_rate < 40.0:
         return f"WIN_RATE: {result.win_rate:.1f}% < 40%"

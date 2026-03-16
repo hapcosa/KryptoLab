@@ -1072,8 +1072,8 @@ def _print_best_trial_report(sym_result, args):
             chunk = months[i:i+4]
             parts = []
             for m in chunk:
-                mi = "✅" if m['return'] > 0 else "❌"
-                parts.append(f"{m['month']}: {m['return']:+.1f}% "
+                mi = "✅" if m.get('pnl_pct', m.get('return', 0)) > 0 else "❌"
+                parts.append(f"{m['month']}: {m['pnl_pct']:+.1f}% "
                              f"({m['trades']}t {m['win_rate']:.0f}%wr) {mi}")
             line = "  ║  " + "   ".join(parts)
             line += " " * max(0, w - len(line) + 4) + "║"
@@ -1100,8 +1100,8 @@ def _print_best_trial_report(sym_result, args):
             chunk = months[i:i+4]
             parts = []
             for m in chunk:
-                mi = "✅" if m['return'] > 0 else "❌"
-                parts.append(f"{m['month']}: {m['return']:+.1f}% "
+                mi = "✅" if m.get('pnl_pct', m.get('return', 0)) > 0 else "❌"
+                parts.append(f"{m['month']}: {m['pnl_pct']:+.1f}% "
                              f"({m['trades']}t {m['win_rate']:.0f}%wr) {mi}")
             line = "  ║  " + "   ".join(parts)
             line += " " * max(0, w - len(line) + 4) + "║"

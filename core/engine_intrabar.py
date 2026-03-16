@@ -175,11 +175,13 @@ class IntrabarBacktestEngine(BacktestEngine):
             signal = processor.update_partial(
                 high=p_high,
                 low=p_low,
-                close=p_close,    # ← "latest tick" of the 1h bar
+                close=p_close,  # ← "latest tick" of the 1h bar
                 volume=p_vol,
                 timestamp=d_ts,
                 is_bar_close=is_close,
             )
+            if signal is not None and self._signal_start_ts > 0 and d_ts < self._signal_start_ts:
+                signal = None
 
             # 4. Apply daily signal cap (engine-level, redundant safety)
             if signal is not None:

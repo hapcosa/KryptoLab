@@ -318,8 +318,20 @@ def cmd_backtest(args):
     t0 = time.time()
 
     engine = engine_factory()
-    result = engine.run(strategy, data, symbol, timeframe)
 
+    # ── Warmup fix: signals only after user's --start date ──
+    if not args.get('sample', False):
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            _start_str = args.get('start', '')
+            if _start_str:
+                _start_ts = int(_dt.fromisoformat(_start_str).replace(
+                    tzinfo=_tz.utc).timestamp() * 1000)
+                engine.set_signal_start(_start_ts)
+        except (ValueError, OSError, AttributeError):
+            pass
+
+    result = engine.run(strategy, data, symbol, timeframe)
     elapsed = time.time() - t0
     bars = len(data['close'])
     print(f"   Done in {elapsed:.2f}s ({bars / elapsed:.0f} bars/sec)")

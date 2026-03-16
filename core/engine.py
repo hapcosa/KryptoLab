@@ -140,6 +140,7 @@ class BacktestEngine:
                  funding_interval_hours: int = 8,
                  max_positions: int = 1,
                  market_config: dict = None):
+
         self.initial_capital = initial_capital
         self.fee_maker = fee_maker
         self.fee_taker = fee_taker
@@ -160,7 +161,9 @@ class BacktestEngine:
         self._equity: List[float] = []
         self._trade_counter = 0
         self._detail_data: Optional[dict] = None
-        self._daily_signal_count: Dict[tuple, int] = {}  # (y,m,d) → count
+        self._signal_start_ts = 0  # 0 = no restriction (warmup fix)
+        self._daily_signal_count: Dict[tuple, int] = {}
+
 
     def set_detail_data(self, detail_data: dict, detail_tf: str):
         """
@@ -169,7 +172,8 @@ class BacktestEngine:
         """
         self._detail_data = detail_data
         self._detail_tf = detail_tf
-
+    def set_signal_start(self, ts_ms: int):
+        self._signal_start_ts = ts_ms
     def run(self, strategy: IStrategy, data: dict,
             symbol: str = "", timeframe: str = "",
             callback=None) -> BacktestResult:
@@ -228,7 +232,10 @@ class BacktestEngine:
                 self._apply_funding(bar)
 
             # 3. Generate new signal (+ close-on-opposite-signal)
-            signal = strategy.generate_signal(indicators, i, data)
+            if self._signal_start_ts > 0 and bar['timestamp'] < self._signal_start_ts:
+                signal = None
+            else:
+                signal = strategy.generate_signal(indicators, i, data)
 
             # Daily signal limit: skip if max reached for this day
             if signal is not None:
