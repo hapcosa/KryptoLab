@@ -140,7 +140,7 @@ class CyberCycleStrategyhtf(IStrategy):
     def parameter_defs(self) -> List[ParamDef]:
         return [
             # ═══ ALPHA METHOD — all 5 methods ═══
-            ParamDef('alpha_method', 'categorical', 'kalman',
+            ParamDef('alpha_method', 'categorical', 'manual',
                      options=['kalman', 'manual']),
             ParamDef('manual_alpha', 'float', 0.42, 0.05, 0.80, 0.01),
             ParamDef('alpha_floor', 'float', 0.0, 0.0, 0.50, 0.01),
@@ -185,9 +185,9 @@ class CyberCycleStrategyhtf(IStrategy):
 
             # Fixed mode
             ParamDef('sl_fixed_pct',   'float', 2.0, 0.3, 5.0, 0.1),
-            ParamDef('tp1_fixed_pct',  'float', 1.0, 0.5, 5.0, 0.25),
-            ParamDef('tp1_fixed_size', 'float', 0.35, 0.1, 0.9, 0.05),
-            ParamDef('tp2_fixed_pct',  'float', 2.0, 1.0, 10.0, 0.5),
+            ParamDef('tp1_fixed_pct',  'float', 2.0, 0.5, 5.0, 0.25),
+            ParamDef('tp1_fixed_size', 'float', 0.6, 0.1, 0.9, 0.05),
+            ParamDef('tp2_fixed_pct',  'float', 3.0, 1.0, 10.0, 0.5),
 
             # Break-even & Trailing
             ParamDef('be_pct', 'float', 1.0, 0.8, 4.5, 0.1),
