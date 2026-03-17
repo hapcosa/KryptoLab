@@ -588,11 +588,13 @@ class CyberCycleStrategyv3(IStrategy):
         (v6.3: 20/25/20/20/10/5 without HTF) which differ from Pine.
         For maximum Pine parity, use --no-intrabar (bar-close mode).
         """
-        from indicators.incremental_ehlers import IncrementalCyberCycleV2
+        from indicators.incremental_ehlers import IncrementalCyberCycleV3
+
+
 
         full_params = self.default_params()
         full_params.update(self.params)
-        return IncrementalCyberCycleV2(full_params, detail_tf_ratio=detail_tf_ratio)
+        return IncrementalCyberCycleV3(full_params, detail_tf_ratio=detail_tf_ratio)
 
     def default_params(self) -> dict:
         """Return default values for all parameters."""

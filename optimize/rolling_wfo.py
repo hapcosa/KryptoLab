@@ -600,7 +600,10 @@ def _bayesian_increment(
 
         batch_size = n_jobs
         completed = 0
-        best_obj = study.best_value if study.best_trial else -999.0
+        try:
+            best_obj = study.best_value
+        except ValueError:
+            best_obj = -999.0
         t0 = time.time()
 
         if verbose:
@@ -951,12 +954,14 @@ def _run_single_window(
                 print(f"\n  ⚠️ No trial passed quality gate ({gate_str})")
 
         # Fallback: pick best ignoring quality gate
+        is_fallback = False
         if best is None and all_trial_results:
             best = _find_best_trial(all_trial_results, 0, 0.0)
+            is_fallback = True
             if verbose and best:
                 wr = best.get('backtest', {}).get('win_rate', 0)
                 print(f"\n  ⚠️ Fallback: best unqualified trial "
-                      f"(#{best.get('trial_rank','?')}, WR={wr:.1f}%)")
+                      f"(#{best.get('trial_rank', '?')}, WR={wr:.1f}%)")
 
         # Strip _bt_result from all trials
         for tr in all_trial_results:
@@ -998,8 +1003,28 @@ def _run_single_window(
             return result
 
         # ═══ STEP 4: BACKTEST WINNER ON TEST-2 ═══
+        if is_fallback and has_quality_gate:
+            if verbose:
+                print(f"\n  ⏭️  Skip T2: no trial passed quality gate — "
+                      f"flat period (0% return)")
+            result.t2_sharpe = 0.0
+            result.t2_return = 0.0
+            result.t2_max_drawdown = 0.0
+            result.t2_win_rate = 0.0
+            result.t2_profit_factor = 0.0
+            result.t2_n_trades = 0
+            result.t2_calmar = 0.0
+            result.t2_sortino = 0.0
+            result.t2_equity = np.array([])
+            result.t2_trades = []
+            result.degradation_sharpe = 0.0
+            result.degradation_return = 0.0
+            result.error = "skipped_t2_fallback"
+            result.elapsed_seconds = time.time() - t0
+            return result
+
         if verbose:
-            print(f"\n  🎯 Step 4: Verify winner (Trial #{best.get('trial_rank','?')}) "
+            print(f"\n  🎯 Step 4: Verify winner (Trial #{best.get('trial_rank', '?')}) "
                   f"on TEST-2 ({win['test2_start']}→{win['test2_end']})")
 
         t2_args = {'symbol': symbol, 'timeframe': timeframe,

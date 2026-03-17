@@ -78,40 +78,48 @@ def classify_vt(close, high, low,
                 vol_period: int = 20,
                 vol_lookback: int = 100,
                 trend_threshold: float = 0.002,
-                vol_percentile: float = 70.0
+                vol_percentile: float = 70.0,
+                itrend_alpha: float = 0.07,
                 ):
     """
-    Volatility-Trend regime classification (rule-based).
+    Volatility-Trend regime classification using Ehlers iTrend.
 
     Logic:
-      1. Trend = sign of EMA slope (EMA(close, trend_period))
+      1. Trend = iTrend direction (iTrend[i] vs iTrend[i-2])
+         + slope magnitude filter (avoids classifying noise as trend)
       2. Volatility = ATR(vol_period) / close
-      3. High-vol = normalized ATR > percentile threshold
-      4. Trend threshold is ADAPTIVE to asset volatility
+      3. High-vol = normalized ATR > rolling percentile threshold
 
     Regime assignment:
-      - High-vol + Up slope   → HIGH_VOL_UP
-      - High-vol + Down slope → HIGH_VOL_DOWN
-      - Low-vol + Up slope    → TREND_UP
-      - Low-vol + Down slope  → TREND_DOWN
-      - Low-vol + Flat slope  → RANGING
+      - High-vol + Up    → HIGH_VOL_UP
+      - High-vol + Down  → HIGH_VOL_DOWN
+      - Low-vol  + Up    → TREND_UP
+      - Low-vol  + Down  → TREND_DOWN
+      - Low-vol  + Flat  → RANGING
     """
     import numpy as np
-    from indicators.common import ema, atr
+    from indicators.common import atr
+    from indicators.ehlers import itrend
 
     n = len(close)
     labels = np.full(n, Regime.RANGING, dtype=int)
 
-    # Trend: EMA slope
-    ema_line = ema(close, trend_period)
-    slope = np.zeros(n)
-    for i in range(1, n):
-        slope[i] = (ema_line[i] - ema_line[i - 1]) / close[i] if close[i] > 0 else 0
+    # ── Trend: Ehlers iTrend (much faster reaction than EMA) ──
+    it = itrend(close, itrend_alpha)
 
-    # Smoothed slope
-    slope_smooth = ema(slope, 10)
+    # iTrend direction: same logic as CyberCycle strategy
+    # bull = it[i] > it[i-2], bear = it[i] < it[i-2]
+    it_direction = np.zeros(n)  # +1 bull, -1 bear, 0 flat
+    for i in range(2, n):
+        diff = it[i] - it[i - 2]
+        if close[i] > 0:
+            it_direction[i] = diff / close[i]
 
-    # Volatility: normalized ATR
+    # Smooth direction to avoid whipsaws (5-bar EMA)
+    from indicators.common import ema as ema_fn
+    dir_smooth = ema_fn(it_direction, 5)
+
+    # ── Volatility: normalized ATR ──
     atr_vals = atr(high, low, close, vol_period)
     norm_vol = np.zeros(n)
     for i in range(n):
@@ -122,25 +130,34 @@ def classify_vt(close, high, low,
     for i in range(vol_lookback, n):
         window = norm_vol[max(0, i - vol_lookback):i + 1]
         vol_threshold[i] = np.percentile(window, vol_percentile)
-    # Fill early bars
     if vol_lookback < n:
         vol_threshold[:vol_lookback] = vol_threshold[vol_lookback]
 
-    # ── FIX: Adaptive trend threshold ──
-    # The fixed 0.002 is too low for crypto (ETH, BTC have higher slopes).
-    # Scale by median normalized volatility so the classifier auto-adapts.
-    median_vol = np.median(norm_vol[vol_lookback:]) if vol_lookback < n else np.median(norm_vol)
-    adaptive_threshold = max(trend_threshold, median_vol * 0.4)
+    # ── Adaptive trend threshold ──
+    # Use percentile of abs(dir_smooth) to auto-calibrate
+    # Bars where |direction| > p30 of its own distribution → trending
+    warmup = max(vol_lookback, 50)
+    abs_dir = np.abs(dir_smooth)
+    if warmup < n:
+        dir_p30 = np.percentile(abs_dir[warmup:], 30)
+    else:
+        dir_p30 = np.percentile(abs_dir, 30)
+    # Ensure minimum sensitivity
+    dir_threshold = max(1e-6, dir_p30)
 
-    # Classify
-    for i in range(n):
+    # ── Classify each bar ──
+    for i in range(2, n):
         is_high_vol = norm_vol[i] > vol_threshold[i]
-        is_up = slope_smooth[i] > adaptive_threshold
-        is_down = slope_smooth[i] < -adaptive_threshold
+        is_up = dir_smooth[i] > dir_threshold
+        is_down = dir_smooth[i] < -dir_threshold
 
         if is_high_vol:
-            labels[i] = Regime.HIGH_VOL_UP if is_up else (
-                Regime.HIGH_VOL_DOWN if is_down else Regime.RANGING)
+            if is_up:
+                labels[i] = Regime.HIGH_VOL_UP
+            elif is_down:
+                labels[i] = Regime.HIGH_VOL_DOWN
+            else:
+                labels[i] = Regime.RANGING
         else:
             if is_up:
                 labels[i] = Regime.TREND_UP
@@ -149,13 +166,12 @@ def classify_vt(close, high, low,
             else:
                 labels[i] = Regime.RANGING
 
-    # Build segments and stats
     features = {
-        'ema': ema_line,
-        'slope': slope_smooth,
+        'itrend': it,
+        'direction': dir_smooth,
         'norm_vol': norm_vol,
         'vol_threshold': vol_threshold,
-        'adaptive_threshold': adaptive_threshold,  # NEW: for debugging
+        'dir_threshold': dir_threshold,
     }
 
     segments = _build_segments(labels, close)

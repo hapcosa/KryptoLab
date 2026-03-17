@@ -340,7 +340,9 @@ def _evaluate_single_trial(trial_idx, trial_params, is_metrics,
                 sr = get_strategy(strategy_name)
                 sr.set_params({'leverage': leverage})
                 sr.set_params(trial_params)
-                rr = detect_regime(data, method='vt', verbose=False)
+                _ita = sr.get_param('itrend_alpha', 0.07)
+                rr = detect_regime(data, method='vt', verbose=False,
+                                   itrend_alpha=_ita)
                 perf = strategy_regime_performance(
                     sr, data, engine_factory, rr,
                     symbol=symbol, timeframe=tf, verbose=False)
@@ -726,87 +728,174 @@ def run_pipeline(args):
             _print_leaderboard(sym_result)
 
             # ═══════════════════════════════════════════════
-            # STEP 5: T2 VERIFICATION
+            # STEP 5: T2 VERIFICATION + ANALYSIS
             # ═══════════════════════════════════════════════
             if has_t2 and best and isinstance(best.get('backtest'), dict):
-                print(f"\n  🎯 Step 5: T2 Verification "
-                      f"({args['bt2_start']} → {args['bt2_end']})")
+                # ── Skip T2 if best is fallback (no trial passed gates) ──
+                is_fallback = best.get('skipped_reason') is not None
+                if is_fallback:
+                    print(f"\n  ⏭️  Skip T2: no trial passed validation gates "
+                          f"(best #{best.get('trial_rank', '?')} is fallback)")
+                    sym_result['t2_result'] = {
+                        'total_return': 0.0, 'sharpe_ratio': 0.0,
+                        'win_rate': 0.0, 'max_drawdown': 0.0,
+                        'profit_factor': 0.0, 'n_trades': 0,
+                        'n_longs': 0, 'n_shorts': 0,
+                        'skipped': True, 'reason': 'fallback_trial',
+                    }
+                else:
+                    print(f"\n  🎯 Step 5: T2 Verification "
+                          f"({args['bt2_start']} → {args['bt2_end']})")
 
-                t2_load = {
-                    'symbol': symbol, 'timeframe': tf,
-                    'start': args['bt2_start'], 'end': args['bt2_end']}
+                    t2_load = {
+                        'symbol': symbol, 'timeframe': tf,
+                        'start': args['bt2_start'], 'end': args['bt2_end']}
 
-                t2_data, t2_detail, _, _ = _load_data(t2_load, tf)
-                t2_ef = _make_engine_factory(
-                    capital, t2_detail, market, no_intrabar=no_intrabar)
+                    t2_data, t2_detail, _, _ = _load_data(t2_load, tf)
+                    t2_ef = _make_engine_factory(
+                        capital, t2_detail, market, no_intrabar=no_intrabar)
 
-                print(f"     {len(t2_data['close'])} bars loaded")
-                print(f"    🚀 Backtest...", end=" ", flush=True)
+                    print(f"     {len(t2_data['close'])} bars loaded")
+                    print(f"    🚀 Backtest...", end=" ", flush=True)
 
-                s2 = get_strategy(strategy_name)
-                s2.set_params({'leverage': leverage})
-                s2.set_params(best.get('params', {}))
+                    s2 = get_strategy(strategy_name)
+                    s2.set_params({'leverage': leverage})
+                    s2.set_params(best.get('params', {}))
 
-                e2 = t2_ef()
-                r2 = e2.run(s2, t2_data, symbol, tf)
+                    e2 = t2_ef()
+                    r2 = e2.run(s2, t2_data, symbol, tf)
 
-                from optimize.grid_search import compute_monthly_stats as _cms
+                    from optimize.grid_search import compute_monthly_stats as _cms
 
-                t2 = {
-                    'total_return': round(r2.total_return, 2),
-                    'annual_return': round(r2.annual_return, 2),
-                    'sharpe_ratio': round(r2.sharpe_ratio, 2),
-                    'sortino_ratio': round(r2.sortino_ratio, 2),
-                    'max_drawdown': round(r2.max_drawdown, 2),
-                    'calmar_ratio': round(r2.calmar_ratio, 2),
-                    'win_rate': round(r2.win_rate, 1),
-                    'profit_factor': round(r2.profit_factor, 2),
-                    'n_trades': r2.n_trades,
-                    'n_longs': r2.n_longs,
-                    'n_shorts': r2.n_shorts,
-                    'avg_win': round(r2.avg_win, 2),
-                    'avg_loss': round(r2.avg_loss, 2),
-                }
+                    t2 = {
+                        'total_return': round(r2.total_return, 2),
+                        'annual_return': round(r2.annual_return, 2),
+                        'sharpe_ratio': round(r2.sharpe_ratio, 2),
+                        'sortino_ratio': round(r2.sortino_ratio, 2),
+                        'max_drawdown': round(r2.max_drawdown, 2),
+                        'calmar_ratio': round(r2.calmar_ratio, 2),
+                        'win_rate': round(r2.win_rate, 1),
+                        'profit_factor': round(r2.profit_factor, 2),
+                        'n_trades': r2.n_trades,
+                        'n_longs': r2.n_longs,
+                        'n_shorts': r2.n_shorts,
+                        'avg_win': round(r2.avg_win, 2),
+                        'avg_loss': round(r2.avg_loss, 2),
+                    }
 
-                n_liq = sum(1 for t in r2.trades
-                            if t.exit_reason == 'liquidation')
-                if n_liq > 0:
-                    t2['liquidations'] = n_liq
+                    n_liq = sum(1 for t in r2.trades
+                                if t.exit_reason == 'liquidation')
+                    if n_liq > 0:
+                        t2['liquidations'] = n_liq
 
-                # Monthly stats for T2
-                try:
-                    ms2 = _cms(r2.trades)
-                    if ms2['n_months'] >= 1:
-                        t2['monthly'] = {
-                            'avg_return': round(ms2['avg_monthly_return'], 2),
-                            'pct_positive': round(ms2['pct_positive'], 1),
-                            'monthly_sharpe': round(ms2['monthly_sharpe'], 2),
-                            'worst_month': round(ms2['worst_month'], 2),
-                            'best_month': round(ms2['best_month'], 2),
-                            'n_months': ms2['n_months'],
-                            'months': ms2['months'],
+                    print(f"SR={r2.sharpe_ratio:.2f} "
+                          f"Ret={r2.total_return:+.1f}% "
+                          f"WR={r2.win_rate:.1f}% "
+                          f"DD={r2.max_drawdown:.1f}% "
+                          f"T={r2.n_trades}"
+                          f"{f' ⚠️{n_liq}LIQ' if n_liq else ''}")
+
+                    # ── T2 Validate ──
+                    try:
+                        print(f"    🔬 T2 Validate...", end=" ", flush=True)
+                        from optimize.anti_overfit import AntiOverfitPipeline
+                        sv2 = get_strategy(strategy_name)
+                        sv2.set_params({'leverage': leverage})
+                        sv2.set_params(best.get('params', {}))
+                        pg2 = _build_validation_grid(sv2)
+                        vp2 = AntiOverfitPipeline(
+                            wfa_windows=4,
+                            mc_simulations=args.get('mc_sims', 500),
+                            fail_fast=False, verbose=False)
+                        vr2 = vp2.run(sv2, t2_data, t2_ef, pg2, symbol, tf)
+                        t2['validate'] = {
+                            'all_passed': getattr(vr2, 'all_passed', False),
+                            'layers_passed': getattr(vr2, 'layers_passed', 0),
+                            'wfa_passed': getattr(vr2, 'wfa_passed', False),
+                            'mc_passed': getattr(vr2, 'mc_passed', False),
+                            'sensitivity_passed': getattr(vr2, 'sensitivity_passed', False),
+                            'overfit_passed': getattr(vr2, 'overfit_passed', False),
                         }
-                except Exception:
-                    pass
+                        m2v = "✅" if t2['validate']['all_passed'] else "⚠️"
+                        print(f"{m2v} {t2['validate']['layers_passed']}/4 layers")
+                    except Exception as e:
+                        print(f"❌ {e}")
+                        t2['validate'] = {'status': 'FAILED', 'error': str(e)}
 
-                # Degradation
-                t1_sr = best['backtest'].get('sharpe_ratio', 0)
-                t1_ret = best['backtest'].get('total_return', 0)
-                if abs(t1_sr) > 0.01:
-                    t2['degradation_sharpe'] = round(
-                        (t1_sr - r2.sharpe_ratio) / abs(t1_sr) * 100, 1)
-                if abs(t1_ret) > 0.01:
-                    t2['degradation_return'] = round(
-                        (t1_ret - r2.total_return) / abs(t1_ret) * 100, 1)
+                    # ── T2 Regime ──
+                    try:
+                        print(f"    🔄 T2 Regime...", end=" ", flush=True)
+                        from ml.regime_detector import detect_regime, strategy_regime_performance
+                        sr2 = get_strategy(strategy_name)
+                        sr2.set_params({'leverage': leverage})
+                        sr2.set_params(best.get('params', {}))
+                        _ita2 = sr2.get_param('itrend_alpha', 0.07)
+                        rr2 = detect_regime(t2_data, method='vt', verbose=False,
+                                            itrend_alpha=_ita2)
+                        perf2 = strategy_regime_performance(
+                            sr2, t2_data, t2_ef, rr2,
+                            symbol=symbol, timeframe=tf, verbose=False)
+                        t2['regime'] = {str(k): v for k, v in perf2.items()
+                                        if isinstance(v, dict)} if isinstance(perf2, dict) else {}
+                        print("✅")
+                    except Exception as e:
+                        print(f"❌ {e}")
+                        t2['regime'] = {'status': 'FAILED', 'error': str(e)}
 
-                sym_result['t2_result'] = t2
+                    # ── T2 Targets ──
+                    try:
+                        print(f"    📅 T2 Targets...", end=" ", flush=True)
+                        from ml.temporal_targets import (
+                            evaluate_targets,
+                            CONSERVATIVE_TARGETS, AGGRESSIVE_TARGETS, CONSISTENCY_TARGETS)
+                        tmap2 = {
+                            'conservative': CONSERVATIVE_TARGETS,
+                            'aggressive': AGGRESSIVE_TARGETS,
+                            'consistency': CONSISTENCY_TARGETS}
+                        tspecs2 = tmap2.get(args.get('targets', 'conservative'),
+                                            CONSERVATIVE_TARGETS)
+                        tt2 = evaluate_targets(
+                            tspecs2, r2.trades,
+                            t2_data.get('timestamp', np.arange(len(t2_data['close']))),
+                            r2.equity_curve,
+                            initial_capital=capital, verbose=False)
+                        t2['targets'] = {
+                            'all_passed': getattr(tt2, 'all_passed', False),
+                            'n_passed': getattr(tt2, 'n_passed', 0),
+                            'n_targets': getattr(tt2, 'n_targets', 0)}
+                        m2t = "✅" if t2['targets']['all_passed'] else "⚠️"
+                        print(f"{m2t} {t2['targets']['n_passed']}/{t2['targets']['n_targets']} targets")
+                    except Exception as e:
+                        print(f"❌ {e}")
+                        t2['targets'] = {'status': 'FAILED', 'error': str(e)}
 
-                print(f"SR={r2.sharpe_ratio:.2f} "
-                      f"Ret={r2.total_return:+.1f}% "
-                      f"WR={r2.win_rate:.1f}% "
-                      f"DD={r2.max_drawdown:.1f}% "
-                      f"T={r2.n_trades}"
-                      f"{f' ⚠️{n_liq}LIQ' if n_liq else ''}")
+                    # Monthly stats for T2
+                    try:
+                        ms2 = _cms(r2.trades)
+                        if ms2['n_months'] >= 1:
+                            t2['monthly'] = {
+                                'avg_return': round(ms2['avg_monthly_return'], 2),
+                                'pct_positive': round(ms2['pct_positive'], 1),
+                                'monthly_sharpe': round(ms2['monthly_sharpe'], 2),
+                                'worst_month': round(ms2['worst_month'], 2),
+                                'best_month': round(ms2['best_month'], 2),
+                                'n_months': ms2['n_months'],
+                                'months': ms2['months'],
+                            }
+                    except Exception:
+                        pass
+
+                    # Degradation
+                    t1_sr = best['backtest'].get('sharpe_ratio', 0)
+                    t1_ret = best['backtest'].get('total_return', 0)
+                    if abs(t1_sr) > 0.01:
+                        t2['degradation_sharpe'] = round(
+                            (t1_sr - r2.sharpe_ratio) / abs(t1_sr) * 100, 1)
+                    if abs(t1_ret) > 0.01:
+                        t2['degradation_return'] = round(
+                            (t1_ret - r2.total_return) / abs(t1_ret) * 100, 1)
+
+                    sym_result['t2_result'] = t2
 
             # ═══════════════════════════════════════════════
             # DETAILED BEST TRIAL REPORT
@@ -1072,9 +1161,9 @@ def _print_best_trial_report(sym_result, args):
             chunk = months[i:i+4]
             parts = []
             for m in chunk:
-                mi = "✅" if m.get('pnl_pct', m.get('return', 0)) > 0 else "❌"
+                mi = "✅" if m['pnl_pct'] > 0 else "❌"
                 parts.append(f"{m['month']}: {m['pnl_pct']:+.1f}% "
-                             f"({m['trades']}t {m['win_rate']:.0f}%wr) {mi}")
+                             f"({m['n_trades']}t {m['win_rate']:.0f}%wr) {mi}")
             line = "  ║  " + "   ".join(parts)
             line += " " * max(0, w - len(line) + 4) + "║"
             print(line)
@@ -1100,9 +1189,9 @@ def _print_best_trial_report(sym_result, args):
             chunk = months[i:i+4]
             parts = []
             for m in chunk:
-                mi = "✅" if m.get('pnl_pct', m.get('return', 0)) > 0 else "❌"
+                mi = "✅" if m['pnl_pct'] > 0 else "❌"
                 parts.append(f"{m['month']}: {m['pnl_pct']:+.1f}% "
-                             f"({m['trades']}t {m['win_rate']:.0f}%wr) {mi}")
+                             f"({m['n_trades']}t {m['win_rate']:.0f}%wr) {mi}")
             line = "  ║  " + "   ".join(parts)
             line += " " * max(0, w - len(line) + 4) + "║"
             print(line)
@@ -1184,27 +1273,30 @@ def _print_summary(all_results, total_elapsed, output_root, args):
             ts = (f"{tgt.get('n_passed','?')}/{tgt.get('n_targets','?')}"
                   if isinstance(tgt, dict) and 'n_passed' in tgt else '—')
 
-            line = (f"  {symbol:<10} "
-                    f"#{best.get('trial_rank','?'):>2} "
-                    f"{bt['sharpe_ratio']:>5.2f} "
-                    f"{bt['total_return']:>+7.1f}% "
-                    f"{bt['win_rate']:>4.1f}% "
-                    f"{bt['max_drawdown']:>4.1f}% "
-                    f"{bt.get('profit_factor',0):>4.2f} "
-                    f"{bt.get('n_trades',0):>4} "
+            line = (f"  {symbol:<12} "
+                    f"#{best.get('trial_rank', '?'):>3} "
+                    f"{bt['sharpe_ratio']:>6.2f} "
+                    f"{bt['total_return']:>+8.1f}% "
+                    f"{bt['win_rate']:>5.1f}% "
+                    f"{bt['max_drawdown']:>5.1f}% "
+                    f"{bt.get('profit_factor', 0):>5.2f} "
+                    f"{bt.get('n_trades', 0):>4} "
                     f"{vs:>4} {ts:>4}")
 
             t2 = sr.get('t2_result', {})
             if has_t2 and isinstance(t2, dict) and 'sharpe_ratio' in t2:
                 deg = t2.get('degradation_sharpe', 0)
-                icon = "🟢" if t2['total_return'] > 0 else "🔴"
-                line += (f" │ "
-                         f"{t2['sharpe_ratio']:>5.2f} "
-                         f"{t2['total_return']:>+7.1f}% "
-                         f"{t2.get('win_rate',0):>4.1f}% "
-                         f"{t2.get('max_drawdown',0):>4.1f}% "
-                         f"{t2.get('n_trades',0):>4} "
-                         f"{deg:>+4.0f}% {icon}")
+                icon = "🟢" if t2.get('total_return', 0) > 0 else "🔴"
+                if t2.get('skipped'):
+                    line += f" │ {'—':>6} {'SKIP':>8} {'—':>5} {'—':>5} {'—':>4} {'—':>5}"
+                else:
+                    line += (f" │ "
+                             f"{t2['sharpe_ratio']:>6.2f} "
+                             f"{t2['total_return']:>+8.1f}% "
+                             f"{t2.get('win_rate', 0):>5.1f}% "
+                             f"{t2.get('max_drawdown', 0):>5.1f}% "
+                             f"{t2.get('n_trades', 0):>4} "
+                             f"{deg:>+5.0f}% {icon}")
             print(line)
 
             sym_summary = {

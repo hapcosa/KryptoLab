@@ -1073,7 +1073,7 @@ def cmd_regime(args):
     leverage = args.get('leverage', 3.0)         # FIX: era None, ahora default 3.0 como cmd_backtest
 
     strategy = get_strategy(strategy_name)
-
+    itrend_alpha = strategy.get_param('itrend_alpha', 0.07)
     # FIX: Siempre aplicar leverage (igual que cmd_backtest)
     strategy.set_params({'leverage': leverage})
 
@@ -1101,7 +1101,7 @@ def cmd_regime(args):
     from ml.regime_detector import detect_regime, strategy_regime_performance
 
     # Detect regimes
-    rr = detect_regime(data, method='vt', verbose=True)
+    rr = detect_regime(data, method='vt', verbose=True,itrend_alpha=itrend_alpha)
 
     # Analyze per-regime performance
     perf = strategy_regime_performance(

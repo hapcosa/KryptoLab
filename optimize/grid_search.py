@@ -549,8 +549,8 @@ def diagnose_rejection(result, max_liq_per_month: int = 2) -> str:
         liq_bypass = dd > 0 and ret / dd >= 10.0
 
         for month, count in liq_by_month.items():
-            if count > max_liq and not liq_bypass:
-                return f"LIQ_MONTHLY: {count} liquidations in {month} (max={max_liq})"
+            if count > max_liq_per_month and not liq_bypass:
+                return f"LIQ_MONTHLY: {count} liquidations in {month} (max={max_liq_per_month})"
     # monthly_robust gates
     if result.win_rate < 40.0:
         return f"WIN_RATE: {result.win_rate:.1f}% < 40%"
