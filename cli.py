@@ -277,7 +277,7 @@ def cmd_backtest(args):
 
     strategy_name = args.get('strategy', 'cybercycle')
     symbol = args.get('symbol', 'BTCUSDT')
-    timeframe = args.get('timeframe', '4h')
+    timeframe = args.get('timeframe', '1h')
     leverage = args.get('leverage', 3.0)
     capital = args.get('capital', 1000.0)
     start = args.get('start', '2023-01-01')
@@ -340,12 +340,23 @@ def cmd_backtest(args):
     # Print report
     print(format_result(result))
 
-    # Monthly breakdown
+
+    # Monthly breakdown — equity-based (consistent with total_return)
     try:
-        from optimize.grid_search import compute_monthly_stats
-        ms = compute_monthly_stats(result.trades, initial_capital=capital)
+        from optimize.grid_search import (
+            compute_monthly_stats_from_equity, compute_monthly_stats
+        )
+
+        timestamps = data.get('timestamp', None)
+        if timestamps is not None and len(result.equity_curve) > 1:
+            ms = compute_monthly_stats_from_equity(
+                result.equity_curve, timestamps,
+                trades=result.trades, initial_capital=capital)
+        else:
+            ms = compute_monthly_stats(result.trades, initial_capital=capital)
+
         if ms['n_months'] >= 2:
-            print(f"\n  📅 MONTHLY BREAKDOWN")
+            print(f"\\n  📅 MONTHLY BREAKDOWN")
             print(f"  {'─' * 60}")
             for m in ms['months']:
                 icon = '✅' if m['pnl_pct'] >= 0 else '❌'
@@ -353,15 +364,24 @@ def cmd_backtest(args):
                 sign = '+' if m['pnl_pct'] >= 0 else ''
                 print(f"  {m['year']}-{m['month']:02d}  {sign}{m['pnl_pct']:>6.1f}%  "
                       f"{m['n_trades']:>3}t  WR={m['win_rate']:>4.0f}%  "
-                      f"{icon} {'▓' if m['pnl_pct']>=0 else '░'}{bar}")
+                      f"{icon} {'▓' if m['pnl_pct'] >= 0 else '░'}{bar}")
             print(f"  {'─' * 60}")
+
+            # Compound verification
+            compound = 1.0
+            for m in ms['months']:
+                compound *= (1 + m['pnl_pct'] / 100)
+            compound_ret = (compound - 1) * 100
+
             print(f"  Avg: {ms['avg_monthly_return']:+.1f}%/mo | "
                   f"Positive: {ms['pct_positive']:.0f}% | "
                   f"mSR: {ms['monthly_sharpe']:.2f} | "
                   f"Best: {ms['best_month']:+.1f}% | "
                   f"Worst: {ms['worst_month']:+.1f}%")
-    except Exception:
-        pass
+            print(f"  Σ Compound: {compound_ret:+.1f}%  "
+                  f"(Total Return: {result.total_return:+.1f}%)")
+    except Exception as e:
+        print(f"  ⚠️ Monthly error: {e}")
 
     # Save trade log
     trade_df = result_to_dataframe(result)

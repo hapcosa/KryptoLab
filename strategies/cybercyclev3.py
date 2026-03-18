@@ -125,7 +125,7 @@ class CyberCycleStrategyv3(IStrategy):
     def parameter_defs(self) -> List[ParamDef]:
         return [
             # ── Alpha method (solo Kalman + Manual) ──────────────
-            ParamDef('alpha_method', 'categorical', 'kalman',
+            ParamDef('alpha_method', 'categorical', 'manual',
                      options=['kalman', 'manual']),
             ParamDef('manual_alpha', 'float', 0.42, 0.05, 0.80, 0.01),
             ParamDef('alpha_floor', 'float', 0.0, 0.0, 0.50, 0.01),
@@ -164,12 +164,12 @@ class CyberCycleStrategyv3(IStrategy):
 
             # ── Risk params: FIXED mode (sltp_fixed) ────────────
             ParamDef('sl_fixed_pct', 'float', 2.0, 0.3, 5.0, 0.1),
-            ParamDef('tp1_fixed_pct', 'float', 1.0, 0.5, 5.0, 0.25),
-            ParamDef('tp1_fixed_size', 'float', 0.35, 0.1, 0.9, 0.05),
-            ParamDef('tp2_fixed_pct', 'float', 2.0, 1.0, 10.0, 0.5),
+            ParamDef('tp1_fixed_pct', 'float',2.0, 0.5, 5.0, 0.25),
+            ParamDef('tp1_fixed_size', 'float', 0.40, 0.1, 0.9, 0.05),
+            ParamDef('tp2_fixed_pct', 'float', 2.7, 1.0, 10.0, 0.5),
 
             # ── Break-even ───────────────────────────────────────
-            ParamDef('be_pct', 'float', 1.0, 0.0, 4.5, 0.1),
+            ParamDef('be_pct', 'float', 1.5, 0.0, 4.5, 0.1),
 
             # ── Trailing stop ────────────────────────────────────
             ParamDef('use_trailing', 'bool', True),

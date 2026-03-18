@@ -13,10 +13,10 @@ import numpy as np
 import copy
 import time
 import itertools
-from typing import Dict, List, Any, Callable, Optional, Tuple
+from typing import Dict, List, Any, Callable, Optional, Tuple, defaultdict
 from dataclasses import dataclass, field
 from concurrent.futures import ProcessPoolExecutor, as_completed
-
+from datetime import datetime, timezone
 
 @dataclass
 class GridSearchTrial:
@@ -272,7 +272,167 @@ def compute_weekly_stats(trades) -> dict:
         'avg_weekly_return': avg_ret,
         'n_weeks': n_weeks,
     }
+def compute_monthly_stats_from_equity(equity_curve, timestamps,
+                                      trades=None,
+                                      initial_capital: float = 1000.0) -> dict:
+    """
+    Compute monthly breakdown directly from the equity curve.
 
+    AUTHORITATIVE monthly breakdown — mathematically consistent with
+    the engine's total_return because both derive from the same equity curve.
+
+    When equity is sampled (intrabar engine), timestamps are interpolated.
+    Monthly returns are chained: month[i+1] starts where month[i] ended,
+    ensuring Π(1 + r_i) = total_return exactly.
+
+    Args:
+        equity_curve: np.ndarray from BacktestResult.equity_curve
+        timestamps:   np.ndarray of timestamps (ms) from source data.
+                      If len != len(equity_curve), timestamps are interpolated.
+        trades:       Optional trade list — for n_trades/win_rate per month only.
+        initial_capital: Starting capital (reference only).
+
+    Returns:
+        Same dict format as compute_monthly_stats (drop-in compatible).
+        Extra: _compound_return, _equity_return for verification.
+    """
+    equity = np.asarray(equity_curve, dtype=np.float64)
+    n_eq = len(equity)
+
+    _empty = {
+        'months': [], 'monthly_returns': [],
+        'pct_positive': 0.0, 'worst_month': 0.0, 'best_month': 0.0,
+        'monthly_sharpe': 0.0, 'avg_monthly_return': 0.0, 'n_months': 0,
+    }
+    if n_eq < 2:
+        return _empty
+
+    # ── Map equity indices → timestamps ──
+    ts = np.asarray(timestamps, dtype=np.int64)
+    n_ts = len(ts)
+
+    if n_eq == n_ts:
+        eq_ts = ts.copy()
+    else:
+        # Equity sampled: interpolate
+        idx = np.linspace(0, n_ts - 1, n_eq).astype(int)
+        idx = np.clip(idx, 0, n_ts - 1)
+        eq_ts = ts[idx]
+
+    # ── Helpers ──
+    def _ts_to_ym(t):
+        s = t / 1000 if t > 1e12 else float(t)
+        dt = datetime.fromtimestamp(s, tz=timezone.utc)
+        return (dt.year, dt.month)
+
+    # ── Enumerate months ──
+    first_ym = _ts_to_ym(eq_ts[0])
+    last_ym = _ts_to_ym(eq_ts[-1])
+
+    all_months = []
+    y, m = first_ym
+    while (y, m) <= last_ym:
+        all_months.append((y, m))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+
+    if not all_months:
+        return _empty
+
+    # ── Find equity at month boundaries ──
+    boundaries = []  # (year, month, start_idx, end_idx)
+
+    for (y, mo) in all_months:
+        start_ms = int(datetime(y, mo, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        if mo == 12:
+            next_ms = int(datetime(y + 1, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        else:
+            next_ms = int(datetime(y, mo + 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+
+        si = int(np.searchsorted(eq_ts, start_ms, side='left'))
+        ei = int(np.searchsorted(eq_ts, next_ms, side='left')) - 1
+
+        si = max(0, min(si, n_eq - 1))
+        ei = max(0, min(ei, n_eq - 1))
+
+        if si <= ei:
+            boundaries.append((y, mo, si, ei))
+
+    if not boundaries:
+        return _empty
+
+    # ── Chain: month N+1 starts where month N ended ──
+    chain_start = [equity[b[2]] for b in boundaries]
+    chain_end = [equity[b[3]] for b in boundaries]
+
+    for i in range(1, len(boundaries)):
+        chain_start[i] = chain_end[i - 1]
+
+    # ── Group trades by month (display only, NOT for PnL) ──
+    monthly_trades = defaultdict(list)
+    if trades:
+        for t in trades:
+            tv = getattr(t, 'exit_time', 0)
+            if tv > 1e9:
+                monthly_trades[_ts_to_ym(tv)].append(t)
+
+    # ── Per-month stats ──
+    months_data = []
+    monthly_rets = []
+
+    for i, (y, mo, si, ei) in enumerate(boundaries):
+        eq_s = chain_start[i]
+        eq_e = chain_end[i]
+
+        pnl_pct = ((eq_e / eq_s - 1) * 100) if eq_s > 0 else 0.0
+        pnl = eq_e - eq_s
+
+        mt = monthly_trades.get((y, mo), [])
+        n_t = len(mt)
+        wins = sum(1 for t in mt if getattr(t, 'net_pnl', 0) > 0)
+        wr = (wins / n_t * 100) if n_t > 0 else 0
+
+        months_data.append({
+            'year': y, 'month': mo,
+            'pnl': round(pnl, 4),
+            'pnl_pct': round(pnl_pct, 2),
+            'n_trades': n_t,
+            'win_rate': round(wr, 1),
+        })
+        monthly_rets.append(pnl_pct)
+
+    mr = np.array(monthly_rets)
+    n_months = len(mr)
+
+    if n_months == 0:
+        return _empty
+
+    pos = int(np.sum(mr > 0))
+    avg_ret = float(np.mean(mr))
+    std_ret = float(np.std(mr)) if n_months > 1 else 1.0
+    m_sharpe = (avg_ret / std_ret) if std_ret > 0 else 0.0
+
+    # Verification
+    compound = 1.0
+    for r in monthly_rets:
+        compound *= (1 + r / 100)
+    compound_ret = (compound - 1) * 100
+    equity_ret = (equity[-1] / equity[0] - 1) * 100
+
+    return {
+        'months': months_data,
+        'monthly_returns': monthly_rets,
+        'pct_positive': (pos / n_months * 100),
+        'worst_month': float(np.min(mr)),
+        'best_month': float(np.max(mr)),
+        'monthly_sharpe': m_sharpe,
+        'avg_monthly_return': avg_ret,
+        'n_months': n_months,
+        '_compound_return': round(compound_ret, 2),
+        '_equity_return': round(equity_ret, 2),
+    }
 
 def objective_monthly(result) -> float:
     """
@@ -312,6 +472,7 @@ def objective_monthly(result) -> float:
 
     score = monthly_sr * pct_pos * worst_penalty * (0.5 + 0.5 * wr) * coverage_factor
     return score
+
 
 
 def objective_monthly_robust(result) -> float:
