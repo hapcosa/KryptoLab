@@ -196,6 +196,7 @@ def _evaluate_single_trial(
     data, detail_info, engine_factory,
     symbol, tf, mc_sims=500, target_preset='conservative',
     min_trades: int = 3, verbose=True,
+    signal_start_date: str = None,  # ← AGREGAR
 ) -> dict:
     """
     Backtest + conditional validate + regime + targets on TEST-1.
@@ -223,6 +224,11 @@ def _evaluate_single_trial(
         strategy.set_params(trial_params)
 
         engine = engine_factory()
+        if signal_start_date:
+            from datetime import datetime as _dt, timezone as _tz
+            _t1_ts = int(_dt.strptime(signal_start_date, '%Y-%m-%d').replace(
+                tzinfo=_tz.utc).timestamp() * 1000)
+            engine.set_signal_start(_t1_ts)
         bt_result = engine.run(strategy, data, symbol, tf)
 
         bt = {
@@ -929,7 +935,7 @@ def _run_single_window(
                     tidx, tparams, ism, strategy_name,
                     leverage, capital, t1_data, t1_detail,
                     t1_ef, symbol, timeframe,
-                    mc_sims, target_preset, dyn_min_trades, verbose)
+                    mc_sims, target_preset, dyn_min_trades, verbose,signal_start_date=win['test1_start'])
                 trial_results.append(tr)
 
             all_trial_results.extend(trial_results)
@@ -1042,6 +1048,10 @@ def _run_single_window(
         s2.set_params(result.best_params)
 
         engine2 = t2_ef()
+        from datetime import datetime as _dt, timezone as _tz
+        _t2_ts = int(_dt.strptime(win['test2_start'], '%Y-%m-%d').replace(
+            tzinfo=_tz.utc).timestamp() * 1000)
+        engine2.set_signal_start(_t2_ts)
         bt2 = engine2.run(s2, t2_data, symbol, timeframe)
 
         result.t2_sharpe = bt2.sharpe_ratio

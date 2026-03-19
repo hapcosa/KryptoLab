@@ -140,7 +140,7 @@ class CyberCycleStrategyv3(IStrategy):
             # ── Signal params ────────────────────────────────────
             ParamDef('itrend_alpha', 'float', 0.09, 0.01, 0.30, 0.01),
             ParamDef('trigger_ema', 'int', 9, 3, 30),
-            ParamDef('min_bars', 'int', 16, 5, 50),
+            ParamDef('min_bars', 'int', 16, 12, 50),
             ParamDef('confidence_min', 'float', 75.0, 30.0, 95.0, 5.0),
             ParamDef('ob_level', 'float', 1.5, 0.3, 3.0, 0.1),
             ParamDef('os_level', 'float', -1.5, -3.0, -0.3, 0.1),

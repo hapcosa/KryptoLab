@@ -763,6 +763,10 @@ def run_pipeline(args):
                     s2.set_params(best.get('params', {}))
 
                     e2 = t2_ef()
+                    from datetime import datetime as _dt, timezone as _tz
+                    _t2_ts = int(_dt.strptime(args['bt2_start'], '%Y-%m-%d').replace(
+                        tzinfo=_tz.utc).timestamp() * 1000)
+                    e2.set_signal_start(_t2_ts)
                     r2 = e2.run(s2, t2_data, symbol, tf)
 
                     from optimize.grid_search import compute_monthly_stats as _cms
