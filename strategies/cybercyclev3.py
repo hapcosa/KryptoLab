@@ -138,9 +138,9 @@ class CyberCycleStrategyv3(IStrategy):
             ParamDef('kal_sensitivity', 'float', 2.0, 0.5, 5.0, 0.5),
 
             # ── Signal params ────────────────────────────────────
-            ParamDef('itrend_alpha', 'float', 0.09, 0.01, 0.30, 0.01),
-            ParamDef('trigger_ema', 'int', 9, 3, 30),
-            ParamDef('min_bars', 'int', 16, 12, 50),
+            ParamDef('itrend_alpha', 'float', 0.18, 0.01, 0.30, 0.01),
+            ParamDef('trigger_ema', 'int', 15, 3, 30),
+            ParamDef('min_bars', 'int', 5, 5, 50),
             ParamDef('confidence_min', 'float', 75.0, 30.0, 95.0, 5.0),
             ParamDef('ob_level', 'float', 1.5, 0.3, 3.0, 0.1),
             ParamDef('os_level', 'float', -1.5, -3.0, -0.3, 0.1),
@@ -149,7 +149,7 @@ class CyberCycleStrategyv3(IStrategy):
             ParamDef('use_trend', 'bool', True),
             ParamDef('use_volume', 'bool', True),
             ParamDef('volume_mult', 'float', 1.5, 0.5, 5.0, 0.1),
-            ParamDef('use_htf', 'bool', False,
+            ParamDef('use_htf', 'bool', False),
 
             # ── SL/TP mode ───────────────────────────────────────
             ParamDef('sltp_type', 'categorical', 'sltp_fixed',
