@@ -494,7 +494,7 @@ def objective_monthly_robust(result) -> float:
     if result.win_rate < 40.0:
         return -999.0
 
-    if result.profit_factor < 1.0:
+    if result.profit_factor < 0.8:
         return -999.0
 
     ms = compute_monthly_stats(result.trades, initial_capital=getattr(result, "initial_capital", 1000.0))

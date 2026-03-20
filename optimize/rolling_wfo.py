@@ -1504,7 +1504,29 @@ def _jd(obj):
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     return str(obj)
-
+def _compact_trials(trials):
+    """Compact trial list for JSON — only essential metrics, no equity/trades."""
+    compact = []
+    for t in trials:
+        bt = t.get('backtest', {})
+        val = t.get('validate', {})
+        tgt = t.get('targets', {})
+        if not isinstance(bt, dict):
+            continue
+        compact.append({
+            'rank': t.get('trial_rank'),
+            'params': t.get('params', {}),
+            'sharpe': bt.get('sharpe_ratio', 0),
+            'return': bt.get('total_return', 0),
+            'win_rate': bt.get('win_rate', 0),
+            'max_dd': bt.get('max_drawdown', 0),
+            'pf': bt.get('profit_factor', 0),
+            'trades': bt.get('n_trades', 0),
+            'val_layers': val.get('layers_passed', 0) if isinstance(val, dict) else 0,
+            'targets': f"{tgt.get('n_passed', 0)}/{tgt.get('n_targets', 0)}" if isinstance(tgt, dict) and 'n_passed' in tgt else None,
+            'skipped': t.get('skipped_reason'),
+        })
+    return compact
 
 def export_wfo_results(result: WFOResult, output_dir: str) -> Path:
     out = Path(output_dir)
@@ -1589,7 +1611,7 @@ def export_wfo_results(result: WFOResult, output_dir: str) -> Path:
                 'targets_passed': w.targets_passed,
                 'targets_total': w.targets_total,
             },
-            'all_trials': w.trials,
+            'all_trials': _compact_trials(w.trials),
             'elapsed_s': round(w.elapsed_seconds, 1),
             'error': w.error,
         }

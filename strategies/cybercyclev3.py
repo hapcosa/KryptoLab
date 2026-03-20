@@ -127,7 +127,7 @@ class CyberCycleStrategyv3(IStrategy):
             # ── Alpha method (solo Kalman + Manual) ──────────────
             ParamDef('alpha_method', 'categorical', 'manual',
                      options=['kalman', 'manual']),
-            ParamDef('manual_alpha', 'float', 0.42, 0.05, 0.80, 0.01),
+            ParamDef('manual_alpha', 'float', 0.42, 0.35, 0.75, 0.01),
             ParamDef('alpha_floor', 'float', 0.0, 0.0, 0.50, 0.01),
 
             # ── Kalman params ────────────────────────────────────
@@ -149,7 +149,7 @@ class CyberCycleStrategyv3(IStrategy):
             ParamDef('use_trend', 'bool', True),
             ParamDef('use_volume', 'bool', True),
             ParamDef('volume_mult', 'float', 1.5, 0.5, 5.0, 0.1),
-            ParamDef('use_htf', 'bool', True),
+            ParamDef('use_htf', 'bool', False,
 
             # ── SL/TP mode ───────────────────────────────────────
             ParamDef('sltp_type', 'categorical', 'sltp_fixed',
@@ -165,7 +165,7 @@ class CyberCycleStrategyv3(IStrategy):
             # ── Risk params: FIXED mode (sltp_fixed) ────────────
             ParamDef('sl_fixed_pct', 'float', 2.0, 0.3, 5.0, 0.1),
             ParamDef('tp1_fixed_pct', 'float',2.0, 0.5, 5.0, 0.25),
-            ParamDef('tp1_fixed_size', 'float', 0.40, 0.1, 0.9, 0.05),
+            ParamDef('tp1_fixed_size', 'float', 0.30, 0.1, 0.9, 0.05),
             ParamDef('tp2_fixed_pct', 'float', 2.7, 1.0, 10.0, 0.5),
 
             # ── Break-even ───────────────────────────────────────
