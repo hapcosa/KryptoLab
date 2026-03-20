@@ -107,10 +107,13 @@ def compute_monthly_stats(trades, initial_capital: float = 1000.0) -> dict:
     """
     Compute monthly breakdown from trade list.
 
-    FIX: pnl_pct is now calculated relative to the running capital
-    at the start of each month, not relative to avg position size.
-    This matches the engine's total_return calculation which uses
-    the equity curve.
+    FIX v2: pnl_pct calculado relativo al running capital al inicio
+    de cada mes, con protecciones contra blown accounts:
+    - Floor de running_capital al 1% del inicial
+    - Detección de blown account (cap < floor)
+    - Cap de pnl_pct mensual a ±200%
+    - Flag 'blown' en meses donde la cuenta está reventada
+    - n_blown_months en el output para diagnóstico
 
     Returns dict with monthly_returns, pct_positive, worst_month,
     monthly_sharpe, and a list of (year, month, pnl_pct, n_trades, wr).
@@ -144,11 +147,17 @@ def compute_monthly_stats(trades, initial_capital: float = 1000.0) -> dict:
     # Sort trades by exit_time to reconstruct capital progression
     all_trades_sorted = sorted(trades, key=lambda t: getattr(t, 'exit_time', 0))
 
-    # Build a map: for each month, what was the capital at its start?
-    # We walk through all trades in order, accumulating net_pnl
+    # ── Build a map: for each month, what was the capital at its start? ──
+
+    # ◀ FIX Bug1: floor mínimo para running_capital
+    # Sin esto, running_capital → $2 produce pnl_pct = -$100/$2 = -5000%
+    # y running_capital ≤ 0 produce 0.0% (guard existente), ocultando
+    # que la cuenta está muerta
+    min_capital = initial_capital * 0.01  # ◀ FIX: floor al 1% del capital inicial
+
     running_capital = initial_capital
     month_start_capital = {}
-    current_month_key = None
+    blown_months = set()   # ◀ FIX: meses donde la cuenta ya estaba reventada
 
     for t in all_trades_sorted:
         ts = getattr(t, 'exit_time', 0)
@@ -161,13 +170,23 @@ def compute_monthly_stats(trades, initial_capital: float = 1000.0) -> dict:
         # First time we see this month → record starting capital
         if key not in month_start_capital:
             month_start_capital[key] = running_capital
+            # ◀ FIX Bug1: marcar como blown si capital bajo el mínimo
+            if running_capital < min_capital:
+                blown_months.add(key)
 
         # Accumulate PnL (net_pnl includes commissions and funding)
         running_capital += getattr(t, 'net_pnl', 0.0)
 
-    # Compute per-month stats
+        # ◀ FIX Bug1: floor — evitar que running_capital caiga indefinidamente
+        # Sin esto, una pérdida de -$100 con capital $2 → capital = -$98
+        # y el siguiente mes empieza con -$98, produciendo artefactos
+        # donde trades normales generan retornos de miles de %
+        running_capital = max(running_capital, min_capital)  # ◀ FIX
+
+    # ── Compute per-month stats ──
     months_data = []
     monthly_rets = []
+
     for (y, m), month_trades in sorted(monthly.items()):
         total_pnl = sum(t.net_pnl for t in month_trades)
         n = len(month_trades)
@@ -176,7 +195,16 @@ def compute_monthly_stats(trades, initial_capital: float = 1000.0) -> dict:
 
         # PnL as % of capital at START of this month
         start_cap = month_start_capital.get((y, m), initial_capital)
-        pnl_pct = (total_pnl / start_cap * 100) if start_cap > 0 else 0
+
+        # ◀ FIX Bug1: meses con cuenta reventada → 0% en vez de -49287%
+        if (y, m) in blown_months or start_cap < min_capital:
+            pnl_pct = 0.0
+        else:
+            pnl_pct = (total_pnl / start_cap * 100)
+            # ◀ FIX Bug1: cap simétrico para contener outliers
+            # -200% ya indica pérdida total del capital del mes; más allá
+            # es artefacto matemático que destruye monthly_sharpe
+            pnl_pct = max(-200.0, min(200.0, pnl_pct))       # ◀ FIX
 
         months_data.append({
             'year': y, 'month': m,
@@ -184,6 +212,7 @@ def compute_monthly_stats(trades, initial_capital: float = 1000.0) -> dict:
             'pnl_pct': pnl_pct,
             'n_trades': n,
             'win_rate': wr,
+            'blown': (y, m) in blown_months,   # ◀ FIX: flag informativo
         })
         monthly_rets.append(pnl_pct)
 
@@ -205,6 +234,7 @@ def compute_monthly_stats(trades, initial_capital: float = 1000.0) -> dict:
         'monthly_sharpe': monthly_sharpe,
         'avg_monthly_return': avg_ret,
         'n_months': n_months,
+        'n_blown_months': len(blown_months),   # ◀ FIX: diagnóstico
     }
 def compute_weekly_stats(trades) -> dict:
     """

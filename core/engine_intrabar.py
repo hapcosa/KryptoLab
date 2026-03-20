@@ -227,23 +227,43 @@ class IntrabarBacktestEngine(BacktestEngine):
                     'drawdown':  self._current_drawdown(),
                 })
 
-        # ── Close any open positions at end of data ──
-        if self._positions and n_detail > 0:
-            last = {
-                'open':      float(detail['open'][-1]),
-                'high':      float(detail['high'][-1]),
-                'low':       float(detail['low'][-1]),
-                'close':     float(detail['close'][-1]),
-                'volume':    float(detail['volume'][-1]),
-                'timestamp': int(detail['timestamp'][-1]),
-            }
+            if self._positions and n_detail > 0:
+                last = {
+                    'open':      float(detail['open'][-1]),
+                    'high':      float(detail['high'][-1]),
+                    'low':       float(detail['low'][-1]),
+                    'close':     float(detail['close'][-1]),
+                    'volume':    float(detail['volume'][-1]),
+                    'timestamp': int(detail['timestamp'][-1]),
+                }
             for pos in list(self._positions):
                 self._close_position(
                     pos, last['close'], n_detail-1, last['timestamp'],
                     'end_of_data')
 
+        # ◀ FIX Bug3: registrar equity REAL final después del force-close
+        #
+        # CRÍTICO en intrabar: equity se samplea cada N barras con:
+        #   if d_idx % equity_sample == 0: self._equity.append(...)
+        #
+        # Con 1.6M barras y equity_sample=533, equity[-1] puede estar
+        # hasta 533 barras (8+ horas) desfasado del cierre real.
+        # Si la posición abierta tenía unrealized PnL positivo en ese
+        # punto pero cerró peor → total_return = (equity[-1] - initial) / initial
+        # reportaba un retorno inflado vs la realidad.
+        #
+        # Ahora equity[-1] = capital real sin posiciones abiertas.
+        if self._equity:
+            final_equity = self._capital  # sin posiciones → equity = capital
+            if abs(final_equity - self._equity[-1]) > 0.01:
+                self._equity.append(final_equity)
+        else:
+            self._equity.append(self._capital)                # ◀ FIX
+
         # ── Compile using main TF bars for annualization stats ──
         return self._compile_results(strategy, main_data, symbol, timeframe)
+
+        # ── Compile using main TF bars for annualization stats ──
 
     def _empty_result(self, strategy, symbol, timeframe) -> BacktestResult:
         return BacktestResult(

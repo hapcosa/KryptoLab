@@ -34,28 +34,29 @@ class Position:
     size: float             # USDT notional
     leverage: float
     margin: float           # Actual margin used
-    
+
     sl_price: float
     original_sl: float
     tp_levels: List[float]  = field(default_factory=list)
     tp_sizes: List[float]   = field(default_factory=list)
     tp_hit: List[bool]      = field(default_factory=list)
-    
+
     be_trigger: float       = 0.0
     be_activated: bool      = False
     trailing: bool          = False
     trailing_distance: float = 0.0
     trailing_activated: bool = False
     trailing_high: float    = 0.0   # Best price since entry (for trailing)
-    
+
     entry_bar: int          = 0
     entry_timestamp: float  = 0.0
-    
+
     unrealized_pnl: float   = 0.0
     realized_pnl: float     = 0.0
     funding_paid: float     = 0.0
     commission_paid: float  = 0.0
-    
+    commission_entry: float = 0.0   # ◀ FIX Bug2: entry commission almacenada aparte
+
     remaining_size: float   = 1.0   # Fraction remaining (1.0 = full)
     confidence: float       = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -284,18 +285,30 @@ class BacktestEngine:
                 })
 
         # Close remaining positions at last bar close
-        if self._positions:
-            last_bar = {
-                'open': data['open'][-1],
-                'high': data['high'][-1],
-                'low': data['low'][-1],
-                'close': data['close'][-1],
-                'volume': data['volume'][-1],
-                'timestamp': data['timestamp'][-1] if 'timestamp' in data else n-1,
-            }
+            if self._positions:
+                last_bar = {
+                    'open': data['open'][-1],
+                    'high': data['high'][-1],
+                    'low': data['low'][-1],
+                    'close': data['close'][-1],
+                    'volume': data['volume'][-1],
+                    'timestamp': data['timestamp'][-1] if 'timestamp' in data else n-1,
+                }
             for pos in list(self._positions):
                 self._close_position(pos, last_bar['close'], n-1,
-                                    last_bar['timestamp'], 'end_of_data')
+                                     last_bar['timestamp'], 'end_of_data')
+
+        # ◀ FIX Bug3: registrar equity REAL final después del force-close
+        # ANTES: equity[-1] era del último bar del loop, ANTES de cerrar
+        #        posiciones forzosamente. Si unrealized PnL era alto en ese
+        #        punto pero el close real fue peor → total_return inflado.
+        # AHORA: equity[-1] = capital real sin posiciones abiertas.
+        if self._equity:
+            final_equity = self._capital  # no hay posiciones → equity = capital
+            if abs(final_equity - self._equity[-1]) > 0.01:
+                self._equity.append(final_equity)
+        else:
+            self._equity.append(self._capital)                # ◀ FIX
 
         # Compile results
         return self._compile_results(strategy, data, symbol, timeframe)
@@ -304,8 +317,16 @@ class BacktestEngine:
 
     def _open_position(self, signal: Signal, bar: dict, bar_idx: int):
         """Open a new position from a signal."""
+        # ◀ FIX Bug2: Guard — no abrir trades con capital agotado
+        if self._capital <= 0:
+            return
+
         # Calculate position size
-        risk_capital = self._capital * 0.08# 8% risk per trade
+        risk_capital = self._capital * 0.08  # 8% risk per trade
+
+        # ◀ FIX: Guard contra capital casi cero → positions microscópicas
+        if risk_capital < 1.0:
+            return
 
         # Commission on entry
         size = risk_capital * signal.leverage
@@ -313,6 +334,12 @@ class BacktestEngine:
 
         if commission >= self._capital:
             return  # Can't afford
+
+        margin = size / signal.leverage
+
+        # ◀ FIX: Guard — margin + commission no puede exceder capital disponible
+        if (margin + commission) > self._capital:
+            return
 
         self._trade_counter += 1
 
@@ -322,7 +349,7 @@ class BacktestEngine:
             entry_price=signal.entry_price,
             size=size,
             leverage=signal.leverage,
-            margin=size / signal.leverage,
+            margin=margin,
             sl_price=signal.sl_price,
             original_sl=signal.sl_price,
             tp_levels=list(signal.tp_levels),
@@ -335,6 +362,7 @@ class BacktestEngine:
             entry_bar=bar_idx,
             entry_timestamp=bar.get('timestamp', bar_idx),
             commission_paid=commission,
+            commission_entry=commission,     # ◀ FIX Bug2: guardar entry commission
             confidence=signal.confidence,
             metadata=signal.metadata,
         )
@@ -604,8 +632,7 @@ class BacktestEngine:
                         pos.trailing_activated = True
 
     def _close_position(self, pos: Position, exit_price: float,
-                        bar_idx: int, timestamp: float, reason: str):
-        """Fully close a position."""
+                            bar_idx: int, timestamp: float, reason: str):
         remaining_notional = pos.size * pos.remaining_size
 
         if pos.direction == 1:
@@ -614,12 +641,22 @@ class BacktestEngine:
             pnl = remaining_notional * (pos.entry_price - exit_price) / pos.entry_price
 
         commission = remaining_notional * self.fee_taker
-        net_pnl = pnl - commission + pos.realized_pnl
 
-        # Return margin + PnL
+        # ◀ FIX Bug2: net_pnl ahora incluye la entry commission
+        # ANTES: net_pnl = pnl - exit_comm + realized_pnl
+        #        → faltaba entry_comm → sum(net_pnl) > delta_equity → PF desacoplado
+        # AHORA: net_pnl = pnl - exit_comm + realized_pnl - entry_comm
+        #        → sum(net_pnl) == delta_equity → PF consistente con total_return
+        net_pnl = pnl - commission + pos.realized_pnl - pos.commission_entry  # ◀ FIX
+
+        # Return margin + PnL (capital flow NO cambia — ya era correcto)
         self._capital += (remaining_notional / pos.leverage) + pnl - commission
 
-        pnl_pct = net_pnl / pos.margin * 100 if pos.margin > 0 else 0.0
+        # ◀ FIX Bug2: pnl_pct usa el MISMO net_pnl final que se guarda en Trade
+        # ANTES: pnl_pct usaba net_pnl sin funding, Trade usaba net_pnl - funding
+        # AHORA: ambos usan total_net_pnl (con funding descontado)
+        total_net_pnl = net_pnl - pos.funding_paid                            # ◀ FIX
+        pnl_pct = total_net_pnl / pos.margin * 100 if pos.margin > 0 else 0.0 # ◀ FIX
 
         trade = Trade(
             id=pos.id,
@@ -633,10 +670,10 @@ class BacktestEngine:
             size=pos.size,
             leverage=pos.leverage,
             pnl=pnl + pos.realized_pnl,
-            pnl_pct=pnl_pct,
-            commission=pos.commission_paid + commission,
+            pnl_pct=pnl_pct,                                # ◀ FIX: consistente
+            commission=pos.commission_paid + commission,      # total (informativo)
             funding=pos.funding_paid,
-            net_pnl=net_pnl - pos.funding_paid,
+            net_pnl=total_net_pnl,                           # ◀ FIX: incluye entry comm
             exit_reason=reason,
             duration_bars=bar_idx - pos.entry_bar,
             confidence=pos.confidence,
