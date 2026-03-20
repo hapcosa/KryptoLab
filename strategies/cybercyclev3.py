@@ -127,7 +127,7 @@ class CyberCycleStrategyv3(IStrategy):
             # ── Alpha method (solo Kalman + Manual) ──────────────
             ParamDef('alpha_method', 'categorical', 'manual',
                      options=['kalman', 'manual']),
-            ParamDef('manual_alpha', 'float', 0.42, 0.35, 0.75, 0.01),
+            ParamDef('manual_alpha', 'float', 0.42, 0.35, 0.60, 0.01),
             ParamDef('alpha_floor', 'float', 0.0, 0.0, 0.50, 0.01),
 
             # ── Kalman params ────────────────────────────────────
@@ -138,10 +138,10 @@ class CyberCycleStrategyv3(IStrategy):
             ParamDef('kal_sensitivity', 'float', 2.0, 0.5, 5.0, 0.5),
 
             # ── Signal params ────────────────────────────────────
-            ParamDef('itrend_alpha', 'float', 0.18, 0.01, 0.30, 0.01),
-            ParamDef('trigger_ema', 'int', 15, 3, 30),
-            ParamDef('min_bars', 'int', 5, 5, 50),
-            ParamDef('confidence_min', 'float', 75.0, 30.0, 95.0, 5.0),
+            ParamDef('itrend_alpha', 'float', 0.09, 0.01, 0.30, 0.01),
+            ParamDef('trigger_ema', 'int', 9, 3, 25),
+            ParamDef('min_bars', 'int', 12, 5, 24),
+            ParamDef('confidence_min', 'float', 75.0, 50.0, 85.0, 5.0),
             ParamDef('ob_level', 'float', 1.5, 0.3, 3.0, 0.1),
             ParamDef('os_level', 'float', -1.5, -3.0, -0.3, 0.1),
 
@@ -156,7 +156,7 @@ class CyberCycleStrategyv3(IStrategy):
                      options=['slatr_tprr', 'sltp_fixed']),
 
             # ── Risk params: ATR mode (slatr_tprr) ──────────────
-            ParamDef('leverage', 'float', 20.0, 5.0, 40.0, 5.0),
+            ParamDef('leverage', 'float', 8.0, 5.0, 40.0, 5.0),
             ParamDef('sl_atr_mult', 'float', 1.5, 0.5, 4.0, 0.1),
             ParamDef('tp1_rr', 'float', 2.0, 0.5, 5.0, 0.25),
             ParamDef('tp1_size', 'float', 0.6, 0.1, 0.9, 0.05),
