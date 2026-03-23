@@ -43,30 +43,15 @@ def get_strategy(name: str):
     elif name in ('smartmoney', 'smc', 'sm'):
         from strategies.smartmoney import SmartMoneyStrategy
         return SmartMoneyStrategy()
-    elif name in ('cybercyclev2','ccv2','cyberv2'):
-        from strategies.cybercyclev2 import CyberCycleStrategyv2
-        return CyberCycleStrategyv2()
+    elif name in ('cybercyclev4','ccv4','cyberv4'):
+        from strategies.cybercyclev4 import CyberCycleStrategyv4
+        return CyberCycleStrategyv4()
     elif name in ('cybercyclev3','ccv3','cyberv3'):
         from strategies.cybercyclev3 import CyberCycleStrategyv3
         return CyberCycleStrategyv3()
     elif name in ('cybercyclehtf','cchtf','cyberhtf'):
         from strategies.cybercyclehtf import CyberCycleStrategyhtf
         return CyberCycleStrategyhtf()
-    elif name in ('cybercyclev5','ccv5','cyberv5'):
-        from strategies.cybercyclev5 import CyberCycleStrategyv5
-        return CyberCycleStrategyv5()
-    elif name in ('cybercyclev6','ccv6','cyberv6'):
-        from strategies.cybercyclev6 import CyberCycleStrategyv6
-        return CyberCycleStrategyv6()
-    elif name in ('cybercyclev7','ccv7','cyberv7'):
-        from strategies.cybercyclev7 import CyberCycleStrategyv7
-        return CyberCycleStrategyv7()
-    elif name in ('cybercyclev8','ccv8','cyberv8'):
-        from strategies.cybercyclev8 import CyberCycleStrategyv8
-        return CyberCycleStrategyv8()
-    elif name in ('cybercyclev9','ccv9','cyberv9'):
-        from strategies.cybercyclev9 import CyberCycleStrategyv9
-        return CyberCycleStrategyv9()
     elif name in ('cybercyclenohtf','ccnohtf','cybernohtf'):
         from strategies.cybercyclenohtf import CyberCycleNoHTFStrategy
         return CyberCycleNoHTFStrategy()
@@ -278,22 +263,26 @@ def cmd_backtest(args):
     strategy_name = args.get('strategy', 'cybercycle')
     symbol = args.get('symbol', 'BTCUSDT')
     timeframe = args.get('timeframe', '1h')
-    leverage = args.get('leverage', 3.0)
     capital = args.get('capital', 1000.0)
     start = args.get('start', '2023-01-01')
     end = args.get('end', '2025-01-01')
 
     strategy = get_strategy(strategy_name)
 
-    # Override leverage
-    strategy.set_params({'leverage': leverage})
-
-    # Load params from JSON file (overrides defaults, leverage stays unless in file)
+    # ── FIX: Orden correcto — JSON primero, CLI override después ──
+    # 1) Cargar JSON (incluye leverage de la optimización)
     _load_params_file(args, strategy)
 
-    # Apply any extra params
+    # 2) CLI leverage SIEMPRE gana si fue explícitamente pasado
+    if 'leverage' in args:
+        strategy.set_params({'leverage': args['leverage']})
+
+    # 3) Extra params al final
     if 'params' in args:
         strategy.set_params(args['params'])
+
+    # 4) Leer leverage EFECTIVO de la estrategia para display
+    leverage = strategy.get_param('leverage', 3.0)
 
     print(f"\n⚡ CryptoLab — {strategy.name()}")
     print(f"   {symbol} | {timeframe} | {start} → {end}")
@@ -483,10 +472,10 @@ def cmd_validate(args):
     strategy = get_strategy(strategy_name)
 
     # FIX: Siempre aplicar leverage (igual que cmd_backtest)
-    strategy.set_params({'leverage': leverage})
-
-    # Load params from JSON file
-    _load_params_file(args, strategy)
+    _load_params_file(args, strategy)        # ← JSON primero
+    if 'leverage' in args:                   # ← CLI gana si fue pasado
+        strategy.set_params({'leverage': args['leverage']})
+    leverage = strategy.get_param('leverage', 3.0)
 
     print(f"\n🔬 CryptoLab — Anti-Overfitting Validation")
     print(f"   Strategy: {strategy.name()}")
@@ -960,17 +949,19 @@ def cmd_optimize(args):
             result = getattr(optimizer, 'last_result', None)
 
     # ── Print results (complete OR partial) ──────────────────────
+    # ── Print results (complete OR partial) ──────────────────────
     if result is not None:
         trials = getattr(result, 'trials', None)
         if trials is None:
             trials = getattr(result, 'hall_of_fame', [])
 
         if trials:
-            from optimize.grid_search import compute_monthly_stats
+            # ◀ FIX: importar AMBAS funciones de monthly stats
+            from optimize.grid_search import compute_monthly_stats, compute_monthly_stats_from_equity
 
             n_shown = min(10, len(trials))
             label = "PARTIAL " if interrupted else ""
-            print(f"\n{'═' * 80}")
+            print(f"\\n{'═' * 80}")
             print(f"{label}Top {n_shown} Results ({method} / {objective})")
             print(f"{'═' * 80}")
 
@@ -986,28 +977,59 @@ def cmd_optimize(args):
                 params = getattr(trial, 'params', {})
 
                 # Header for this trial
-                print(f"\n  ┌─ #{i+1} {'─' * 60}")
+                print(f"\\n  ┌─ #{i+1} {'─' * 60}")
                 print(f"  │ SR={sr:.2f}  Ret={ret:+.1f}%  WR={wr:.1f}%  "
                       f"DD={dd:.1f}%  PF={pf:.2f}  Trades={nt}")
 
-                # Key params (compact)
+                # ◀ FIX 3: key_params dinámicos según sltp_type + optimized params
                 key_params = {}
-                for k in ['alpha_method', 'confidence_min', 'leverage',
-                          'sl_atr_mult', 'tp1_rr', 'tp1_size', 'tp2_rr',
-                          'use_trend', 'use_htf', 'close_on_signal',
-                          'be_pct', 'trail_activate_pct', 'trail_pullback_pct']:
+                sltp = params.get('sltp_type', 'sltp_fixed')
+                if sltp == 'sltp_fixed':
+                    sltp_keys = ['sl_fixed_pct', 'tp1_fixed_pct', 'tp1_fixed_size',
+                                 'tp2_fixed_pct']
+                else:
+                    sltp_keys = ['sl_atr_mult', 'tp1_rr', 'tp1_size', 'tp2_rr']
+
+                display_keys = ['alpha_method', 'confidence_min', 'leverage'] + sltp_keys + [
+                    'use_trend', 'use_htf', 'close_on_signal',
+                    'be_pct', 'trail_activate_pct', 'trail_pullback_pct']
+
+                # Agregar parámetros optimizados que no estén en la lista base
+                optimized = getattr(trial, 'optimized_params', None)
+                if optimized and isinstance(optimized, dict):
+                    for ok in optimized:
+                        if ok not in display_keys:
+                            display_keys.append(ok)
+                # Fallback: si param_subset está disponible, agregar también
+                if param_subset:
+                    for ps in param_subset:
+                        if ps not in display_keys:
+                            display_keys.append(ps)
+
+                for k in display_keys:
                     if k in params:
                         v = params[k]
                         key_params[k] = f'{v:.1f}' if isinstance(v, float) else str(v)
                 print(f"  │ {key_params}")
 
-                # Monthly breakdown
+                # ◀ FIX 2: Monthly breakdown — equity-based (consistent with backtest)
                 try:
                     trial_strat = copy.deepcopy(strategy)
                     trial_strat.set_params(params)
                     trial_engine = engine_factory()
                     trial_result = trial_engine.run(trial_strat, data, symbol, tf)
-                    ms = compute_monthly_stats(trial_result.trades, initial_capital=capital)
+
+                    # ◀ FIX: usar compute_monthly_stats_from_equity
+                    # (misma función que cmd_backtest) para que los %
+                    # mensuales sean consistentes con total_return y
+                    # max_drawdown del engine.
+                    timestamps = data.get('timestamp', None)
+                    if timestamps is not None and len(trial_result.equity_curve) > 1:
+                        ms = compute_monthly_stats_from_equity(
+                            trial_result.equity_curve, timestamps,
+                            trades=trial_result.trades, initial_capital=capital)
+                    else:
+                        ms = compute_monthly_stats(trial_result.trades, initial_capital=capital)
 
                     if ms['n_months'] >= 2:
                         # Compact monthly line
@@ -1073,26 +1095,214 @@ def cmd_optimize(args):
                 objective=objective, method=method + tag, extra=extra_json,
             )
         else:
-            print("\n   ❌ No completed trials to show.")
+            print("\\n   ❌ No completed trials to show.")
     elif interrupted:
-        print("\n   ❌ No trials completed before interruption.")
+        print("\\n   ❌ No trials completed before interruption.")
 
     return result
 
+def cmd_repair(args):
+    """
+    Diagnosticar y reparar gaps en datos cacheados.
 
+    Tres modos:
+      --diagnose   Solo reportar gaps (no modifica nada)
+      --fill       Forward-fill gaps con close anterior (default)
+      --redownload Borrar cache y re-descargar completo
+
+    Uso:
+      python cli.py repair --symbol SOLUSDT --tf 1m
+      python cli.py repair --symbol SOLUSDT --tf 1m --diagnose
+      python cli.py repair --symbol SOLUSDT --tf 1h --redownload --start 2022-01-01 --end 2025-06-25
+    """
+    import shutil
+    from pathlib import Path
+    from data.bitget_client import DataCache, TIMEFRAME_SECONDS
+
+    symbol = args.get('symbol', 'SOLUSDT')
+    tf = args.get('timeframe', '1h')
+    mode = 'fill'  # default
+    if args.get('diagnose'):
+        mode = 'diagnose'
+    elif args.get('redownload'):
+        mode = 'redownload'
+
+    cache = DataCache()
+    tf_ms = TIMEFRAME_SECONDS.get(tf, 3600) * 1000
+
+    # ── MODO REDOWNLOAD: borrar cache y descargar de nuevo ──
+    if mode == 'redownload':
+        start = args.get('start')
+        end = args.get('end')
+        if not start or not end:
+            print("❌ --redownload requiere --start y --end")
+            return
+
+        print(f"\n🔄 Redownload: {symbol} {tf}")
+        print(f"   Range: {start} → {end}")
+
+        # Borrar cache existente
+        cache.delete(symbol, tf)
+        print(f"   Cache borrado")
+
+        # Re-descargar con reintentos agresivos
+        from data.bitget_client import BitgetClient
+        import asyncio
+
+        client = BitgetClient(verbose=True)
+
+        async def _download_robust():
+            """Descarga con reintentos por segmento."""
+            try:
+                df = await client.download_ohlcv(symbol, tf, start, end)
+                return df
+            finally:
+                await client.close()
+
+        df = asyncio.run(_download_robust())
+
+        if df is None or len(df) == 0:
+            print("   ❌ No se pudo descargar data")
+            return
+
+        cache.save(df, symbol, tf)
+        print(f"   ✅ {len(df):,} bars descargadas y guardadas")
+
+        # Diagnosticar gaps en lo descargado
+        _diagnose_gaps(df, tf_ms, symbol, tf)
+        return
+
+    # ── CARGAR DATA EXISTENTE ──
+    if not cache.has_data(symbol, tf):
+        print(f"❌ No hay data cacheada para {symbol} {tf}")
+        print(f"   Usa: python cli.py download --symbol {symbol} --tf {tf}")
+        return
+
+    df = cache.load(symbol, tf)
+    print(f"\n🔍 Diagnóstico: {symbol} {tf}")
+    print(f"   Bars: {len(df):,}")
+
+    if len(df) == 0:
+        print("   ❌ Dataset vacío")
+        return
+
+    # ── DETECTAR GAPS ──
+    gap_info = _diagnose_gaps(df, tf_ms, symbol, tf)
+
+    if mode == 'diagnose':
+        return
+
+    # ── DETECTAR VELAS CON VOLUMEN 0 (fake fills previos) ──
+    zero_vol = (df['volume'] == 0).sum()
+    flat = ((df['open'] == df['high']) & (df['high'] == df['low']) &
+            (df['low'] == df['close'])).sum()
+
+    if zero_vol > 0:
+        print(f"\n   ⚠️  Velas con volumen=0: {zero_vol:,}")
+    if flat > 0:
+        print(f"   ⚠️  Velas flat (O=H=L=C): {flat:,}")
+
+    if gap_info['n_gaps'] == 0 and zero_vol == 0:
+        print(f"\n   ✅ Data OK — sin gaps ni velas fantasma")
+        return
+
+    # ── MODO FILL: forward-fill gaps ──
+    if gap_info['n_gaps'] > 0:
+        print(f"\n🔧 Reparando {gap_info['n_gaps']} gaps...")
+
+        import numpy as np
+        ts_start = int(df['timestamp'].iloc[0])
+        ts_end = int(df['timestamp'].iloc[-1])
+
+        full_ts = np.arange(ts_start, ts_end + tf_ms, tf_ms, dtype=np.int64)
+        full_df = pd.DataFrame({'timestamp': full_ts})
+
+        merged = full_df.merge(df, on='timestamp', how='left')
+
+        # Forward-fill: usar close anterior para OHLC de gaps
+        merged['close'] = merged['close'].ffill()
+        missing = merged['open'].isna()
+        merged.loc[missing, 'open'] = merged.loc[missing, 'close']
+        merged.loc[missing, 'high'] = merged.loc[missing, 'close']
+        merged.loc[missing, 'low'] = merged.loc[missing, 'close']
+        merged.loc[missing, 'volume'] = 0.0
+
+        if 'datetime' in merged.columns:
+            merged['datetime'] = pd.to_datetime(merged['timestamp'], unit='ms', utc=True)
+        merged['volume'] = merged['volume'].fillna(0.0)
+
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            merged[col] = merged[col].astype(np.float64)
+
+        n_filled = missing.sum()
+        print(f"   Bars rellenadas: {n_filled:,}")
+        print(f"   Total después: {len(merged):,}")
+
+        # Backup + guardar
+        cache_dir = cache.cache_dir
+        for ext in ['.parquet', '.csv']:
+            src = cache_dir / f"{symbol}_{tf}{ext}"
+            bak = cache_dir / f"{symbol}_{tf}_backup{ext}"
+            if src.exists() and not bak.exists():
+                shutil.copy2(src, bak)
+                print(f"   Backup: {bak.name}")
+
+        cache.save(merged, symbol, tf)
+        print(f"   ✅ Reparado y guardado")
 # ═══════════════════════════════════════════════════════════════
 #  REGIME — Concurrent detection + backtest (~1.3x speedup)
 # ═══════════════════════════════════════════════════════════════
+def _diagnose_gaps(df, tf_ms, symbol, tf):
+    """Diagnosticar gaps en un DataFrame de velas."""
+    from datetime import datetime, timezone
+    import numpy as np
 
+    diffs = df['timestamp'].diff().dropna()
+    gap_mask = diffs > tf_ms * 1.5
+    n_gaps = int(gap_mask.sum())
+
+    ts_min = df['timestamp'].iloc[0]
+    ts_max = df['timestamp'].iloc[-1]
+    expected = int((ts_max - ts_min) / tf_ms) + 1
+    actual = len(df)
+    missing = expected - actual
+
+    dt_start = datetime.fromtimestamp(ts_min / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
+    dt_end = datetime.fromtimestamp(ts_max / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
+
+    print(f"   Rango: {dt_start} → {dt_end}")
+    print(f"   Esperadas: {expected:,} | Actual: {actual:,} | Faltantes: {missing:,}")
+    print(f"   Gaps (saltos): {n_gaps}")
+
+    if n_gaps > 0:
+        gap_indices = gap_mask[gap_mask].index
+        gap_sizes = []
+        for idx in gap_indices:
+            t1 = df['timestamp'].iloc[idx - 1]
+            t2 = df['timestamp'].iloc[idx]
+            gap_bars = int((t2 - t1) / tf_ms) - 1
+            t1_str = datetime.fromtimestamp(t1 / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M')
+            t2_str = datetime.fromtimestamp(t2 / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M')
+            gap_sizes.append((gap_bars, t1_str, t2_str))
+
+        gap_sizes.sort(reverse=True)
+        print(f"\n   Top 10 gaps más grandes:")
+        for bars, t1, t2 in gap_sizes[:10]:
+            print(f"     {t1} → {t2}  ({bars} bars faltantes)")
+
+    return {'n_gaps': n_gaps, 'missing': missing, 'expected': expected}
 def cmd_regime(args):
     """Detect market regimes and analyze per-regime performance."""
     from data.bitget_client import MarketConfig
 
     strategy_name = args.get('strategy', 'cybercycle')
-    capital = args.get('capital', 1000.0)       # FIX: era 10000.0, ahora igual que cmd_backtest
-    leverage = args.get('leverage', 3.0)         # FIX: era None, ahora default 3.0 como cmd_backtest
+    capital = args.get('capital', 1000.0)       # FIX: era 10000.0, ahora igual que cmd_backtest        # FIX: era None, ahora default 3.0 como cmd_backtest
 
     strategy = get_strategy(strategy_name)
+    _load_params_file(args, strategy)        # ← JSON primero
+    if 'leverage' in args:                   # ← CLI gana si fue pasado
+        strategy.set_params({'leverage': args['leverage']})
+    leverage = strategy.get_param('leverage', 3.0)
     itrend_alpha = strategy.get_param('itrend_alpha', 0.07)
     # FIX: Siempre aplicar leverage (igual que cmd_backtest)
     strategy.set_params({'leverage': leverage})
@@ -1728,7 +1938,12 @@ def main():
             # Sub-command for 'data' command
             args['data_cmd'] = arg
             i += 1
-
+        elif arg == '--diagnose':
+             args['diagnose'] = True
+             i += 1
+        elif arg == '--redownload':
+             args['redownload'] = True
+             i += 1
         else:
             i += 1
 
@@ -1747,6 +1962,7 @@ def main():
         'ensemble': lambda: cmd_ensemble(args),
         'targets': lambda: cmd_targets(args),
         'portfolio': lambda: cmd_combinatorial(args),
+        'repai':lambda : cmd_repair(args),
     }
 
     if command in commands:

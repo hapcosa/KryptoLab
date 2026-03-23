@@ -71,15 +71,15 @@ from indicators.common import (
 # ═══════════════════════════════════════════════════════════════
 
 def compute_confidence_pine(
-        is_buy: bool,
-        bull_cross: bool, bear_cross: bool,
-        bull_trend: bool, bear_trend: bool,
-        in_ob: bool, in_os: bool,
-        volume_ok: bool,
-        fish_rising: bool, fish_falling: bool,
-        momentum_positive: bool, momentum_negative: bool,
-        htf_align_buy: bool, htf_align_sell: bool,
-        use_trend: bool, use_vol: bool,
+    is_buy: bool,
+    bull_cross: bool, bear_cross: bool,
+    bull_trend: bool, bear_trend: bool,
+    in_ob: bool, in_os: bool,
+    volume_ok: bool,
+    fish_rising: bool, fish_falling: bool,
+    momentum_positive: bool, momentum_negative: bool,
+    htf_align_buy: bool, htf_align_sell: bool,
+    use_trend: bool, use_vol: bool,
 ) -> float:
     """
     Confidence scoring — identical to cybercycle_v62.pine.
@@ -159,18 +159,14 @@ class CyberCycleStrategyv3(IStrategy):
             ParamDef('leverage', 'float', 12.0, 4.0, 40.0, 2.0),
             ParamDef('sl_atr_mult', 'float', 1.5, 0.5, 4.0, 0.1),
             ParamDef('tp1_rr', 'float', 2.0, 0.5, 5.0, 0.25),
-            ParamDef('tp1_size', 'float', 0.4, 0.1, 0.7, 0.05),
+            ParamDef('tp1_size', 'float', 0.6, 0.1, 0.9, 0.05),
             ParamDef('tp2_rr', 'float', 3.0, 1.0, 10.0, 0.25),
-            ParamDef('tp2_size', 'float', 0.3, 0.1, 0.6, 0.05),
-            ParamDef('tp3_rr', 'float', 5.0, 2.0, 15.0, 0.5),
 
             # ── Risk params: FIXED mode (sltp_fixed) ────────────
             ParamDef('sl_fixed_pct', 'float', 2.0, 0.3, 5.0, 0.1),
-            ParamDef('tp1_fixed_pct', 'float', 2.0, 0.5, 5.0, 0.25),
-            ParamDef('tp1_fixed_size', 'float', 0.4, 0.1, 0.7, 0.05),
+            ParamDef('tp1_fixed_pct', 'float',2.0, 0.5, 5.0, 0.25),
+            ParamDef('tp1_fixed_size', 'float', 0.30, 0.1, 0.9, 0.05),
             ParamDef('tp2_fixed_pct', 'float', 2.7, 1.0, 10.0, 0.5),
-            ParamDef('tp2_fixed_size', 'float', 0.3, 0.1, 0.6, 0.05),
-            ParamDef('tp3_fixed_pct', 'float', 4.0, 2.0, 20.0, 0.5),
 
             # ── Break-even ───────────────────────────────────────
             ParamDef('be_pct', 'float', 1.5, 0.0, 4.5, 0.1),
@@ -339,28 +335,24 @@ class CyberCycleStrategyv3(IStrategy):
     # ─────────────────────────────────────────────────────────────
 
     def _compute_sltp_atr_rr(self, entry: float, direction: int,
-                             atr_val: float) -> dict:
-        """SL = entry ∓ ATR × mult, TP = entry ± risk × R:R. (3 TPs)"""
+                              atr_val: float) -> dict:
+        """SL = entry ∓ ATR × mult, TP = entry ± risk × R:R."""
         sl_dist = atr_val * self.get_param('sl_atr_mult', 1.5)
         sl = entry - direction * sl_dist
         risk = sl_dist
 
         tp1_rr = self.get_param('tp1_rr', 2.0)
         tp2_rr = self.get_param('tp2_rr', 3.0)
-        tp3_rr = self.get_param('tp3_rr', 5.0)
-        tp1_size = self.get_param('tp1_size', 0.4)
-        tp2_size = self.get_param('tp2_size', 0.3)
-        tp3_size = round(1.0 - tp1_size - tp2_size, 8)
-        tp3_size = max(tp3_size, 0.01)  # safety floor
+        tp1_size = self.get_param('tp1_size', 0.6)
+        tp2_size = round(1.0 - tp1_size, 8)
 
         tp1 = entry + direction * risk * tp1_rr
         tp2 = entry + direction * risk * tp2_rr
-        tp3 = entry + direction * risk * tp3_rr
 
         return {
             'sl': sl,
-            'tp_levels': [tp1, tp2, tp3],
-            'tp_sizes': [tp1_size, tp2_size, tp3_size],
+            'tp_levels': [tp1, tp2],
+            'tp_sizes': [tp1_size, tp2_size],
             'sl_dist': sl_dist,
             'risk': risk,
             'mode': 'slatr_tprr',
@@ -371,28 +363,24 @@ class CyberCycleStrategyv3(IStrategy):
     # ─────────────────────────────────────────────────────────────
 
     def _compute_sltp_fixed(self, entry: float, direction: int) -> dict:
-        """SL = entry × (1 ∓ sl_pct/100), TP = entry × (1 ± tp_pct/100). (3 TPs)"""
+        """SL = entry × (1 ∓ sl_pct/100), TP = entry × (1 ± tp_pct/100)."""
         sl_pct = self.get_param('sl_fixed_pct', 2.0) / 100.0
         tp1_pct = self.get_param('tp1_fixed_pct', 1.0) / 100.0
         tp2_pct = self.get_param('tp2_fixed_pct', 2.0) / 100.0
-        tp3_pct = self.get_param('tp3_fixed_pct', 4.0) / 100.0
-        tp1_size = self.get_param('tp1_fixed_size', 0.4)
-        tp2_size = self.get_param('tp2_fixed_size', 0.3)
-        tp3_size = round(1.0 - tp1_size - tp2_size, 8)
-        tp3_size = max(tp3_size, 0.01)  # safety floor
+        tp1_size = self.get_param('tp1_fixed_size', 0.35)
+        tp2_size = round(1.0 - tp1_size, 8)
 
         sl = entry * (1.0 - direction * sl_pct)
         tp1 = entry * (1.0 + direction * tp1_pct)
         tp2 = entry * (1.0 + direction * tp2_pct)
-        tp3 = entry * (1.0 + direction * tp3_pct)
 
         sl_dist = abs(entry - sl)
         risk = sl_dist
 
         return {
             'sl': sl,
-            'tp_levels': [tp1, tp2, tp3],
-            'tp_sizes': [tp1_size, tp2_size, tp3_size],
+            'tp_levels': [tp1, tp2],
+            'tp_sizes': [tp1_size, tp2_size],
             'sl_dist': sl_dist,
             'risk': risk,
             'mode': 'sltp_fixed',
@@ -578,7 +566,6 @@ class CyberCycleStrategyv3(IStrategy):
                 'sl_dist_atr': sl_dist / atr_val if atr_val > 0 else 0,
                 'tp1': tp_levels[0] if tp_levels else 0,
                 'tp2': tp_levels[1] if len(tp_levels) > 1 else 0,
-                'tp3': tp_levels[2] if len(tp_levels) > 2 else 0,
                 'be_pct': be_pct,
                 'trail_pct': self.get_param('trail_pullback_pct', 1.0) if use_trailing else 0,
                 'partial_bar': False,

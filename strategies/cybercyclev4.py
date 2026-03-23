@@ -1,47 +1,48 @@
 """
-CryptoLab — CyberCycle v6.2 Pine-Parity Strategy
-
-Maximum parity with cybercycle_v62.pine (TradingView).
+CryptoLab — CyberCycle v4 Pine-Parity Strategy
 
 ═══════════════════════════════════════════════════════════════
- CAMBIOS vs cybercyclev3.py original:
+ CAMBIOS vs cybercyclev3.py:
 ═══════════════════════════════════════════════════════════════
 
- 1. ELIMINADOS Homodyne, MAMA, Autocorrelation
-    → Solo Kalman + Manual (los únicos que pasan gates)
-    → Reduce espacio de búsqueda de 35 a ~22 params efectivos
-    → 4x menos CPU en calculate_indicators()
+ 1. HTF FILTER — REAL 4H BAR CONSTRUCTION (Pine-exact)
 
- 2. HTF FILTER CORREGIDO — usa htf_resample() real
-    → Antes: ema(src, 40) vs ema(close, 40) — proxy falso
-    → Ahora: htf_resample(hl2, ts, 14400) vs htf_resample(ema10, ts, 14400)
-    → Replica Pine: request.security("240", hl2) vs request.security("240", ema(close,10))
-    → Requiere timestamps en data['timestamp'] (epoch ms)
+    v3 usaba htf_resample() que toma el último valor de 1H al cierre
+    del período 4H. Esto NO es lo que Pine hace.
 
- 3. CONFIDENCE WEIGHTS = Pine EXACTO (20/15/15/15/10/10/15)
-    → Cross: 20, iTrend: 15, OB/OS: 15, Volume: 15,
-      Fisher: 10, Momentum: 10, HTF: 15 = 100
-    → Antes v3 tenía pesos redistribuidos (25/15/15/15/10/10 = 110)
+    Pine hace:
+      htfSrc = request.security("240", hl2, lookahead=off)
+      htfCC  = request.security("240", ta.ema(close,10), lookahead=off)
 
- 4. HARD TREND FILTER post-confidence (como Pine)
-    → Pine: buySignal = bullCross AND buyConf >= minConf AND barFilter
-            AND (eUseTrend ? bullTrend : true) AND htfAlignBuy
-    → Es un AND separado, NO parte del confidence scoring
-    → Antes: trend solo sumaba pts, no era gate obligatorio
+    Esto significa:
+      - Construye un bar 4H REAL: high = max(4 highs), low = min(4 lows)
+      - hl2 del 4H = (4H_high + 4H_low) / 2  ← NO es hl2 de la última 1H
+      - ema(close,10) se computa sobre los CLOSES de barras 4H
+      - lookahead=off → usa el último bar 4H COMPLETADO
 
- 5. ENTRY PRICE = hl2 en histórico (como Pine)
-    → Pine captura srcCyber (=hl2) en barstate.ishistory, close en realtime
-    → Para backtest histórico, hl2 es la paridad correcta
+    v4 implementa htf_build_real_bars() que replica exactamente esto:
+      1. Agrupa barras 1H en barras 4H usando timestamps
+      2. Construye OHLCV 4H real (high=max, low=min, close=last)
+      3. Computa hl2 y ema10 en el timeframe 4H
+      4. Mapea al TF 1H usando último bar 4H CERRADO (sin lookahead)
+
+    Ahora: Python v4 = Pine = C++ HTFAggregator
+
+ 2. Todo lo demás IDÉNTICO a v3:
+    - Confidence weights: 20/15/15/15/10/10/15 (Pine-exact)
+    - Hard trend filter post-confidence
+    - Entry = hl2 en backtest
+    - Solo Kalman + Manual alpha methods
+    - SL/TP dual mode (ATR + Fixed)
 
 ═══════════════════════════════════════════════════════════════
 
-Filtros activos:
-- 2 alpha methods: Kalman + Manual
-- iTrend filter
-- Fisher Transform
-- Volume filter
-- HTF 4H filter (htf_resample real)
-- Confidence scoring system (0-100) — pesos idénticos a Pine
+Para comparar v3 vs v4:
+  python cli.py backtest --strategy cybercyclev3 --symbol SOLUSDT --tf 1h
+  python cli.py backtest --strategy cybercyclev4 --symbol SOLUSDT --tf 1h
+
+  Con use_htf=false: resultados IDÉNTICOS (HTF no afecta)
+  Con use_htf=true:  v4 coincide con Pine/C++, v3 difiere
 """
 import numpy as np
 from typing import Optional, List, Dict, Any
@@ -51,23 +52,157 @@ from indicators.ehlers import (
     kalman_alpha, cybercycle, itrend, fisher_transform,
 )
 from indicators.common import (
-    ema, sma, atr, crossover, crossunder, volume_ratio, htf_resample,
+    ema, sma, atr, crossover, crossunder, volume_ratio,
 )
 
 
 # ═══════════════════════════════════════════════════════════════
-#  CONFIDENCE — Pine-exact weights (lines 706-725 of .pine)
+#  HTF REAL BAR CONSTRUCTION — Pine request.security() parity
 #
-#  buyConf:
-#    bullCross                        → 20
-#    (eUseTrend ? bullTrend : true)   → 15
-#    inOS                             → 15
-#    (eUseVol ? volumeOK : true)      → 15
-#    fishRising                       → 10
-#    momentum3 > 0                    → 10
-#    htfAlignBuy                      → 15
-#                                     ────
-#                              total: 100
+#  Pine:
+#    htfSrc = request.security(syminfo.tickerid, "240", hl2)
+#    htfCC  = request.security(syminfo.tickerid, "240", ta.ema(close,10))
+#
+#  This builds actual 4H bars from 1H data:
+#    4H_high = max(1H_high[0], 1H_high[1], 1H_high[2], 1H_high[3])
+#    4H_low  = min(1H_low[0], 1H_low[1], 1H_low[2], 1H_low[3])
+#    4H_close = last 1H close
+#    4H_hl2  = (4H_high + 4H_low) / 2
+#
+#  Then ema(close,10) is computed on 4H closes, NOT on 1H closes.
+#  And lookahead=off means we use the last COMPLETED 4H bar.
+# ═══════════════════════════════════════════════════════════════
+
+def htf_build_real_bars(
+        timestamps: np.ndarray,
+        high: np.ndarray,
+        low: np.ndarray,
+        close: np.ndarray,
+        htf_seconds: int = 14400,
+) -> tuple:
+    """
+    Build real HTF bars from LTF data and compute HTF alignment.
+
+    Replicates Pine's request.security("240", hl2) behavior:
+    - Groups LTF bars into HTF bars using timestamps
+    - Builds real HTF OHLCV (high=max, low=min, close=last)
+    - Computes hl2 on HTF bars
+    - Computes ema(close, 10) on HTF bar closes
+    - Maps back to LTF using last COMPLETED HTF bar (no lookahead)
+
+    Args:
+        timestamps: epoch milliseconds for each LTF bar
+        high: LTF high prices
+        low: LTF low prices
+        close: LTF close prices
+        htf_seconds: HTF period in seconds (14400 = 4H)
+
+    Returns:
+        (htf_align_buy, htf_align_sell): boolean arrays aligned to LTF
+    """
+    n = len(timestamps)
+    htf_align_buy = np.ones(n, dtype=bool)
+    htf_align_sell = np.ones(n, dtype=bool)
+
+    if n == 0:
+        return htf_align_buy, htf_align_sell
+
+    htf_ms = htf_seconds * 1000
+
+    # ── Phase 1: Group LTF bars into HTF bars ─────────────────
+    # Each LTF bar belongs to an HTF bar based on its timestamp
+    htf_bar_ids = np.zeros(n, dtype=np.int64)
+    for i in range(n):
+        ts = int(timestamps[i])
+        # Normalize: some data has seconds, some has milliseconds
+        if ts < 1_000_000_000_000:
+            ts *= 1000
+        htf_bar_ids[i] = ts // htf_ms
+
+    # ── Phase 2: Build completed HTF bars ─────────────────────
+    # Collect all unique HTF bar IDs in order
+    completed_htf_bars = []  # list of (htf_bar_id, htf_high, htf_low, htf_close)
+
+    cur_htf_id = htf_bar_ids[0]
+    cur_high = high[0]
+    cur_low = low[0]
+    cur_close = close[0]
+
+    for i in range(1, n):
+        if htf_bar_ids[i] != cur_htf_id:
+            # HTF bar changed → previous bar is complete
+            completed_htf_bars.append((cur_htf_id, cur_high, cur_low, cur_close))
+            # Start new HTF bar
+            cur_htf_id = htf_bar_ids[i]
+            cur_high = high[i]
+            cur_low = low[i]
+            cur_close = close[i]
+        else:
+            # Same HTF bar → update running OHLCV
+            cur_high = max(cur_high, high[i])
+            cur_low = min(cur_low, low[i])
+            cur_close = close[i]
+
+    # Note: last HTF bar may be incomplete — don't add it yet
+    # (Pine's lookahead=off only uses COMPLETED bars)
+
+    if len(completed_htf_bars) < 2:
+        # Not enough HTF bars to compute alignment
+        return htf_align_buy, htf_align_sell
+
+    # ── Phase 3: Compute hl2 and ema10 on HTF bars ───────────
+    htf_hl2_arr = np.array([(h + l) / 2.0 for _, h, l, _ in completed_htf_bars])
+    htf_close_arr = np.array([c for _, _, _, c in completed_htf_bars])
+
+    # EMA(close, 10) computed on HTF closes — exactly like Pine
+    m = len(htf_close_arr)
+    htf_ema10 = np.zeros(m)
+    period = min(10, m)
+    k = 2.0 / (period + 1.0)
+
+    # Initialize EMA with first value
+    htf_ema10[0] = htf_close_arr[0]
+    for j in range(1, m):
+        htf_ema10[j] = htf_close_arr[j] * k + htf_ema10[j - 1] * (1.0 - k)
+
+    # Build a map: htf_bar_id → (hl2, ema10) of that completed bar
+    htf_ids = [bar_id for bar_id, _, _, _ in completed_htf_bars]
+    htf_values = {}  # htf_bar_id → (hl2, ema10)
+    for j in range(m):
+        htf_values[htf_ids[j]] = (htf_hl2_arr[j], htf_ema10[j])
+
+    # ── Phase 4: Map back to LTF bars ────────────────────────
+    # For each LTF bar, find the last COMPLETED HTF bar
+    # (lookahead=off: the HTF bar BEFORE the current one)
+    last_completed_hl2 = htf_hl2_arr[0]
+    last_completed_ema = htf_ema10[0]
+    completed_idx = 0  # pointer into completed_htf_bars
+
+    for i in range(n):
+        current_htf_id = htf_bar_ids[i]
+
+        # Advance the completed pointer up to (but not including) current HTF bar
+        while (completed_idx < m - 1 and
+               htf_ids[completed_idx + 1] < current_htf_id):
+            completed_idx += 1
+
+        # Also include if the completed bar ID < current bar ID
+        if htf_ids[completed_idx] < current_htf_id:
+            last_completed_hl2 = htf_hl2_arr[completed_idx]
+            last_completed_ema = htf_ema10[completed_idx]
+        elif completed_idx > 0:
+            # Current bar is same period as completed — use previous
+            last_completed_hl2 = htf_hl2_arr[completed_idx - 1]
+            last_completed_ema = htf_ema10[completed_idx - 1]
+
+        htf_align_buy[i] = last_completed_hl2 > last_completed_ema
+        htf_align_sell[i] = last_completed_hl2 < last_completed_ema
+
+    return htf_align_buy, htf_align_sell
+
+
+# ═══════════════════════════════════════════════════════════════
+#  CONFIDENCE — Pine-exact weights (identical to v3)
 # ═══════════════════════════════════════════════════════════════
 
 def compute_confidence_pine(
@@ -83,17 +218,7 @@ def compute_confidence_pine(
 ) -> float:
     """
     Confidence scoring — identical to cybercycle_v62.pine.
-
-    Each component contributes a fixed amount:
-        Cross signal:  20  — cycle × trigger crossover detected
-        iTrend:        15  — trend alignment
-        OB/OS zone:    15  — oversold (buy) / overbought (sell)
-        Volume:        15  — volume confirmation
-        Fisher:        10  — Fisher transform direction
-        Momentum:      10  — 3-bar cycle momentum
-        HTF:           15  — higher timeframe alignment
-        ───────────────────
-        Total max:    100
+    Weights: 20/15/15/15/10/10/15 = 100
     """
     conf = 0.0
 
@@ -117,10 +242,14 @@ def compute_confidence_pine(
     return min(conf, 100.0)
 
 
-class CyberCycleStrategyv3(IStrategy):
+# ═══════════════════════════════════════════════════════════════
+#  STRATEGY CLASS
+# ═══════════════════════════════════════════════════════════════
+
+class CyberCycleStrategyv4(IStrategy):
 
     def name(self) -> str:
-        return "CyberCycle v6.2 Pine-Parity"
+        return "CyberCycle v4 Pine-Parity (Real HTF)"
 
     def parameter_defs(self) -> List[ParamDef]:
         return [
@@ -141,7 +270,7 @@ class CyberCycleStrategyv3(IStrategy):
             ParamDef('itrend_alpha', 'float', 0.09, 0.01, 0.30, 0.01),
             ParamDef('trigger_ema', 'int', 9, 3, 25),
             ParamDef('min_bars', 'int', 12, 5, 24),
-            ParamDef('confidence_min', 'float', 75.0, 60.0, 85.0, 5.0),
+            ParamDef('confidence_min', 'float', 75.0, 50.0, 85.0, 5.0),
             ParamDef('ob_level', 'float', 1.5, 0.3, 3.0, 0.1),
             ParamDef('os_level', 'float', -1.5, -3.0, -0.3, 0.1),
 
@@ -156,21 +285,17 @@ class CyberCycleStrategyv3(IStrategy):
                      options=['slatr_tprr', 'sltp_fixed']),
 
             # ── Risk params: ATR mode (slatr_tprr) ──────────────
-            ParamDef('leverage', 'float', 12.0, 4.0, 40.0, 2.0),
+            ParamDef('leverage', 'float', 8.0, 5.0, 40.0, 5.0),
             ParamDef('sl_atr_mult', 'float', 1.5, 0.5, 4.0, 0.1),
             ParamDef('tp1_rr', 'float', 2.0, 0.5, 5.0, 0.25),
-            ParamDef('tp1_size', 'float', 0.4, 0.1, 0.7, 0.05),
+            ParamDef('tp1_size', 'float', 0.6, 0.1, 0.9, 0.05),
             ParamDef('tp2_rr', 'float', 3.0, 1.0, 10.0, 0.25),
-            ParamDef('tp2_size', 'float', 0.3, 0.1, 0.6, 0.05),
-            ParamDef('tp3_rr', 'float', 5.0, 2.0, 15.0, 0.5),
 
             # ── Risk params: FIXED mode (sltp_fixed) ────────────
             ParamDef('sl_fixed_pct', 'float', 2.0, 0.3, 5.0, 0.1),
             ParamDef('tp1_fixed_pct', 'float', 2.0, 0.5, 5.0, 0.25),
-            ParamDef('tp1_fixed_size', 'float', 0.4, 0.1, 0.7, 0.05),
+            ParamDef('tp1_fixed_size', 'float', 0.30, 0.1, 0.9, 0.05),
             ParamDef('tp2_fixed_pct', 'float', 2.7, 1.0, 10.0, 0.5),
-            ParamDef('tp2_fixed_size', 'float', 0.3, 0.1, 0.6, 0.05),
-            ParamDef('tp3_fixed_pct', 'float', 4.0, 2.0, 20.0, 0.5),
 
             # ── Break-even ───────────────────────────────────────
             ParamDef('be_pct', 'float', 1.5, 0.0, 4.5, 0.1),
@@ -193,8 +318,9 @@ class CyberCycleStrategyv3(IStrategy):
         """
         Calculate all CyberCycle indicators.
 
-        Solo computa el alpha method seleccionado (Kalman o Manual).
-        HTF filter usa htf_resample() real con timestamps.
+        Identical to v3 EXCEPT for the HTF filter:
+        v3: htf_resample(hl2_1h) → last 1H hl2 at 4H boundary
+        v4: htf_build_real_bars() → real 4H bar construction (Pine-exact)
         """
         src = data['hl2']
         close = data['close']
@@ -270,34 +396,32 @@ class CyberCycleStrategyv3(IStrategy):
         atr_vals = atr(data['high'], data['low'], close, 14)
 
         # ════════════════════════════════════════════════════════
-        #  HTF FILTER — Pine-parity con htf_resample()
+        #  HTF FILTER — REAL 4H BAR CONSTRUCTION (Pine-exact)
+        #
+        #  v4 FIX: Builds actual 4H bars from 1H data, matching
+        #  Pine's request.security("240", hl2) exactly.
         #
         #  Pine:
-        #    htfSrc = request.security(syminfo.tickerid, "240", hl2)
-        #    htfCC  = request.security(syminfo.tickerid, "240", ta.ema(close,10))
-        #    htfBullish = htfSrc > htfCC
+        #    htfSrc = request.security("240", hl2)
+        #    → hl2 of the real 4H bar = (max_4h_high + min_4h_low) / 2
+        #    NOT the hl2 of the last 1H bar (which is what v3 did)
         #
-        #  Python equivalente:
-        #    1. Resample hl2 al cierre del bar 4H anterior
-        #    2. Resample ema(close,10) al cierre del bar 4H anterior
-        #    3. Comparar sin future leak
+        #    htfCC = request.security("240", ta.ema(close,10))
+        #    → ema10 computed on 4H closes, NOT on 1H closes
+        #
+        #  C++ HTFAggregator does the same: accumulates LTF bars,
+        #  builds real HTF bar, computes ema10 on HTF closes.
         # ════════════════════════════════════════════════════════
         use_htf = self.get_param('use_htf', True)
 
         if use_htf and 'timestamp' in data and data['timestamp'] is not None:
-            ts = data['timestamp']
-
-            # Pine: request.security("240", hl2, lookahead=off)
-            # → valor de hl2 al cierre del último bar 4H completado
-            htf_src = htf_resample(src, ts, 14400)
-
-            # Pine: request.security("240", ta.ema(close, 10), lookahead=off)
-            # → EMA(close,10) evaluado en el TF actual, resampleado a 4H
-            ema10_close = ema(close, 10)
-            htf_cc = htf_resample(ema10_close, ts, 14400)
-
-            htf_align_buy = htf_src > htf_cc
-            htf_align_sell = htf_src < htf_cc
+            htf_align_buy, htf_align_sell = htf_build_real_bars(
+                timestamps=data['timestamp'],
+                high=data['high'],
+                low=data['low'],
+                close=close,
+                htf_seconds=14400,  # 4H
+            )
         elif use_htf:
             # Fallback si no hay timestamps: proxy EMA larga (menos preciso)
             htf_src_fb = ema(src, 40)
@@ -340,27 +464,23 @@ class CyberCycleStrategyv3(IStrategy):
 
     def _compute_sltp_atr_rr(self, entry: float, direction: int,
                              atr_val: float) -> dict:
-        """SL = entry ∓ ATR × mult, TP = entry ± risk × R:R. (3 TPs)"""
+        """SL = entry ∓ ATR × mult, TP = entry ± risk × R:R."""
         sl_dist = atr_val * self.get_param('sl_atr_mult', 1.5)
         sl = entry - direction * sl_dist
         risk = sl_dist
 
         tp1_rr = self.get_param('tp1_rr', 2.0)
         tp2_rr = self.get_param('tp2_rr', 3.0)
-        tp3_rr = self.get_param('tp3_rr', 5.0)
-        tp1_size = self.get_param('tp1_size', 0.4)
-        tp2_size = self.get_param('tp2_size', 0.3)
-        tp3_size = round(1.0 - tp1_size - tp2_size, 8)
-        tp3_size = max(tp3_size, 0.01)  # safety floor
+        tp1_size = self.get_param('tp1_size', 0.6)
+        tp2_size = round(1.0 - tp1_size, 8)
 
         tp1 = entry + direction * risk * tp1_rr
         tp2 = entry + direction * risk * tp2_rr
-        tp3 = entry + direction * risk * tp3_rr
 
         return {
             'sl': sl,
-            'tp_levels': [tp1, tp2, tp3],
-            'tp_sizes': [tp1_size, tp2_size, tp3_size],
+            'tp_levels': [tp1, tp2],
+            'tp_sizes': [tp1_size, tp2_size],
             'sl_dist': sl_dist,
             'risk': risk,
             'mode': 'slatr_tprr',
@@ -371,35 +491,31 @@ class CyberCycleStrategyv3(IStrategy):
     # ─────────────────────────────────────────────────────────────
 
     def _compute_sltp_fixed(self, entry: float, direction: int) -> dict:
-        """SL = entry × (1 ∓ sl_pct/100), TP = entry × (1 ± tp_pct/100). (3 TPs)"""
+        """SL = entry × (1 ∓ sl_pct/100), TP = entry × (1 ± tp_pct/100)."""
         sl_pct = self.get_param('sl_fixed_pct', 2.0) / 100.0
         tp1_pct = self.get_param('tp1_fixed_pct', 1.0) / 100.0
         tp2_pct = self.get_param('tp2_fixed_pct', 2.0) / 100.0
-        tp3_pct = self.get_param('tp3_fixed_pct', 4.0) / 100.0
-        tp1_size = self.get_param('tp1_fixed_size', 0.4)
-        tp2_size = self.get_param('tp2_fixed_size', 0.3)
-        tp3_size = round(1.0 - tp1_size - tp2_size, 8)
-        tp3_size = max(tp3_size, 0.01)  # safety floor
+        tp1_size = self.get_param('tp1_fixed_size', 0.35)
+        tp2_size = round(1.0 - tp1_size, 8)
 
         sl = entry * (1.0 - direction * sl_pct)
         tp1 = entry * (1.0 + direction * tp1_pct)
         tp2 = entry * (1.0 + direction * tp2_pct)
-        tp3 = entry * (1.0 + direction * tp3_pct)
 
         sl_dist = abs(entry - sl)
         risk = sl_dist
 
         return {
             'sl': sl,
-            'tp_levels': [tp1, tp2, tp3],
-            'tp_sizes': [tp1_size, tp2_size, tp3_size],
+            'tp_levels': [tp1, tp2],
+            'tp_sizes': [tp1_size, tp2_size],
             'sl_dist': sl_dist,
             'risk': risk,
             'mode': 'sltp_fixed',
         }
 
     # ─────────────────────────────────────────────────────────────
-    #  SIGNAL GENERATION — Pine-parity
+    #  SIGNAL GENERATION — Pine-parity (identical to v3)
     # ─────────────────────────────────────────────────────────────
 
     def generate_signal(self, ind: dict, idx: int,
@@ -461,11 +577,6 @@ class CyberCycleStrategyv3(IStrategy):
 
         # ═════════════════════════════════════════════════════════
         #  HARD TREND FILTER — post-confidence, como Pine
-        #
-        #  Pine: AND (eUseTrend ? bullTrend : true) AND htfAlignBuy
-        #  Esto es un gate separado del confidence scoring.
-        #  Una señal puede tener conf=100 pero ser rechazada
-        #  si el trend no está alineado.
         # ═════════════════════════════════════════════════════════
         if use_trend:
             if is_buy and not ind['bull_trend'][idx]:
@@ -507,10 +618,6 @@ class CyberCycleStrategyv3(IStrategy):
 
         # ═════════════════════════════════════════════════════════
         #  ENTRY PRICE = hl2 (Pine-parity para backtest histórico)
-        #
-        #  Pine: capturedBuyPrice = barstate.ishistory ? srcCyber : close
-        #  srcCyber = hl2
-        #  En backtest todo es "history", así que entry = hl2
         # ═════════════════════════════════════════════════════════
         entry = data['hl2'][idx]
 
@@ -578,12 +685,12 @@ class CyberCycleStrategyv3(IStrategy):
                 'sl_dist_atr': sl_dist / atr_val if atr_val > 0 else 0,
                 'tp1': tp_levels[0] if tp_levels else 0,
                 'tp2': tp_levels[1] if len(tp_levels) > 1 else 0,
-                'tp3': tp_levels[2] if len(tp_levels) > 2 else 0,
                 'be_pct': be_pct,
                 'trail_pct': self.get_param('trail_pullback_pct', 1.0) if use_trailing else 0,
                 'partial_bar': False,
                 'entry_source': 'hl2',
                 'htf_align': bool(ind['htf_align_buy'][idx] if is_buy else ind['htf_align_sell'][idx]),
+                'htf_method': 'real_4h_bars',  # v4 marker
             }
         )
 
@@ -594,16 +701,9 @@ class CyberCycleStrategyv3(IStrategy):
     def create_incremental_processor(self, detail_tf_ratio: int = 1):
         """
         Create incremental processor for intrabar execution.
-        Uses IncrementalCyberCycleV2 (v6.3 confidence) which is the
-        closest match to this strategy's confidence weights.
-
-        Note: The incremental processor uses its own confidence weights
-        (v6.3: 20/25/20/20/10/5 without HTF) which differ from Pine.
-        For maximum Pine parity, use --no-intrabar (bar-close mode).
+        Uses IncrementalCyberCycleV3 which is the closest match.
         """
         from indicators.incremental_ehlers import IncrementalCyberCycleV3
-
-
 
         full_params = self.default_params()
         full_params.update(self.params)

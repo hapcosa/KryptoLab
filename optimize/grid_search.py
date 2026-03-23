@@ -463,7 +463,33 @@ def compute_monthly_stats_from_equity(equity_curve, timestamps,
         '_compound_return': round(compound_ret, 2),
         '_equity_return': round(equity_ret, 2),
     }
+def _get_monthly_stats(result) -> dict:
+    """
+    Get monthly stats using equity-based method when possible,
+    falling back to trade-based when timestamps not available.
 
+    This ensures objective functions score trials using the same
+    mathematically consistent monthly breakdown as the backtest report.
+    """
+    # Try equity-based (authoritative, consistent with total_return)
+    timestamps = getattr(result, 'timestamps', None)
+    equity = getattr(result, 'equity_curve', None)
+
+    if (timestamps is not None
+            and equity is not None
+            and len(equity) > 1):
+        try:
+            return compute_monthly_stats_from_equity(
+                equity, timestamps,
+                trades=result.trades,
+                initial_capital=getattr(result, 'initial_capital', 1000.0))
+        except Exception:
+            pass  # Fall through to trade-based
+
+    # Fallback: trade-based (less accurate but works without timestamps)
+    return compute_monthly_stats(
+        result.trades,
+        initial_capital=getattr(result, 'initial_capital', 1000.0))
 def objective_monthly(result) -> float:
     """
     Monthly consistency objective.
@@ -471,14 +497,10 @@ def objective_monthly(result) -> float:
 
     Score = monthly_sharpe × pct_positive_months × (1 + min(0, worst_month)/10)
 
-    - monthly_sharpe: mean/std of monthly returns (higher = more consistent)
-    - pct_positive_months: fraction of months with profit > 0 (0-1)
-    - worst_month penalty: if worst month is -20%, multiply by 0.8
-
-    A strategy with SR=2 overall but 3 losing months out of 12 will score
-    much lower than one with SR=1.5 but 0 losing months.
+    Uses equity-based monthly stats when available for mathematical
+    consistency with the engine's total_return and max_drawdown.
     """
-    ms = compute_monthly_stats(result.trades, initial_capital=getattr(result, "initial_capital", 1000.0))
+    ms = _get_monthly_stats(result)  # ◀ FIX: era compute_monthly_stats(...)
 
     if ms['n_months'] < 2:
         return -999.0
@@ -504,6 +526,7 @@ def objective_monthly(result) -> float:
     return score
 
 
+#  Y REEMPLAZAR objective_monthly_robust completa:
 
 def objective_monthly_robust(result) -> float:
     """
@@ -511,12 +534,12 @@ def objective_monthly_robust(result) -> float:
 
     Like 'monthly' but adds hard penalties for:
     - Win rate < 40%  → -999 (lottery strategies)
-    - Leverage > 20x  → progressive penalty
+    - Leverage > 15x  → progressive penalty
     - PF < 1.0        → -999 (net loser)
-    - Max DD > 30%    → progressive penalty
+    - Max DD > 15%    → progressive penalty
 
-    This prevents the optimizer from finding "exploits" like:
-    WR=10%, leverage=30x → a few lucky trades per month.
+    Uses equity-based monthly stats when available for mathematical
+    consistency with the engine's total_return and max_drawdown.
 
     Score = monthly_sharpe × pct_pos × wr_factor × leverage_factor × dd_factor
     """
@@ -524,16 +547,16 @@ def objective_monthly_robust(result) -> float:
     if result.win_rate < 40.0:
         return -999.0
 
-    if result.profit_factor < 0.8:
+    if result.profit_factor < 1.0:
         return -999.0
 
-    ms = compute_monthly_stats(result.trades, initial_capital=getattr(result, "initial_capital", 1000.0))
+    ms = _get_monthly_stats(result)  # ◀ FIX: era compute_monthly_stats(...)
 
     if ms['n_months'] < 2:
         return -999.0
 
     cal_months = _total_calendar_months(result.trades, ms['n_months'])
-    if result.n_trades / cal_months < 3.5:  # min ~1.5 trades/month
+    if result.n_trades / cal_months < 3.5:  # min ~3.5 trades/month
         return -999.0
     coverage = min(1.0, ms['n_months'] / cal_months)
     coverage_factor = coverage ** 0.5
@@ -554,7 +577,7 @@ def objective_monthly_robust(result) -> float:
 
     # Leverage penalty: no penalty ≤15x, linear decay 15x→30x
     lev = result.params.get('leverage', 1.0) if hasattr(result, 'params') else 1.0
-    lev_factor = 1.0 if lev <= 40 else max(0.3, 1.0 - (lev - 40) / 40.0)
+    lev_factor = 1.0 if lev <= 15 else max(0.3, 1.0 - (lev - 15) / 30.0)
 
     # Drawdown penalty: no penalty ≤15%, linear decay 15%→50%
     dd = abs(result.max_drawdown)
@@ -568,7 +591,73 @@ def objective_monthly_robust(result) -> float:
              * coverage_factor)
     return score
 
+def objective_monthly_robust(result) -> float:
+    """
+    Monthly consistency + robustness constraints.
 
+    Like 'monthly' but adds hard penalties for:
+    - Win rate < 40%  → -999 (lottery strategies)
+    - Leverage > 15x  → progressive penalty (antes: 40x — demasiado laxo)
+    - PF < 1.0        → -999 (net loser)  ◀ FIX: era 0.8
+    - Max DD > 15%    → progressive penalty
+
+    This prevents the optimizer from finding "exploits" like:
+    WR=10%, leverage=30x → a few lucky trades per month.
+
+    Score = monthly_sharpe × pct_pos × wr_factor × leverage_factor × dd_factor
+    """
+    # ── Hard gates ──
+    if result.win_rate < 40.0:
+        return -999.0
+
+    # ◀ FIX: era 0.8, ahora 1.0
+    # PF < 1.0 = gross_loss > gross_profit = net loser en dólares absolutos
+    # Una estrategia con PF=0.80 solo es rentable por compounding asimétrico,
+    # lo cual es extremadamente frágil y no tradeable en live.
+    if result.profit_factor < 1.0:
+        return -999.0
+
+    ms = _get_monthly_stats(result)
+
+    if ms['n_months'] < 2:
+        return -999.0
+
+    cal_months = _total_calendar_months(result.trades, ms['n_months'])
+    if result.n_trades / cal_months < 3.5:  # min ~3.5 trades/month
+        return -999.0
+    coverage = min(1.0, ms['n_months'] / cal_months)
+    coverage_factor = coverage ** 0.5
+
+    # ── Monthly consistency score ──
+    monthly_sr = ms['monthly_sharpe']
+    pct_pos = ms['pct_positive'] / 100.0
+
+    # Worst month penalty
+    worst_penalty = 1.0 + min(0, ms['worst_month']) / 100.0
+    worst_penalty = max(0.1, worst_penalty)
+
+    # ── Robustness factors ──
+
+    # Win rate: linear 0.4→1.0 mapped to 0.5→1.0
+    wr = result.win_rate / 100.0
+    wr_factor = 0.5 + 0.5 * min(1.0, (wr - 0.4) / 0.6)
+
+    # ◀ FIX: Leverage penalty — antes: no penalty ≤40x (absurdo para live)
+    # Ahora: no penalty ≤15x, linear decay 15x→30x
+    lev = result.params.get('leverage', 1.0) if hasattr(result, 'params') else 1.0
+    lev_factor = 1.0 if lev <= 15 else max(0.3, 1.0 - (lev - 15) / 30.0)
+
+    # Drawdown penalty: no penalty ≤15%, linear decay 15%→50%
+    dd = abs(result.max_drawdown)
+    dd_factor = 1.0 if dd <= 15 else max(0.2, 1.0 - (dd - 15) / 35.0)
+
+    # Profit factor bonus: PF=1.5 → 1.0, PF=3.0 → 1.3
+    pf_bonus = min(1.5, result.profit_factor / 2.0) if result.profit_factor > 0 else 0.5
+
+    score = (monthly_sr * pct_pos * worst_penalty
+             * wr_factor * lev_factor * dd_factor * pf_bonus
+             * coverage_factor)
+    return score
 def objective_weekly(result) -> float:
     """
     Weekly consistency objective.

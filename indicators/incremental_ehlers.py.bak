@@ -186,10 +186,10 @@ class _HomodyneAlpha:
         pa = math.atan(Im/Re) if abs(Im)>1e-10 and abs(Re)>1e-10 else 0.0
         rp = (2*math.pi/pa) if pa > 0.001 else self.hdp
         rp = max(self.min_p, min(self.max_p,
-                                 max(0.67*self.hdp, min(1.5*self.hdp, rp))))
+               max(0.67*self.hdp, min(1.5*self.hdp, rp))))
         self.hdp = 0.2*rp + 0.8*self.hdp
         self.smp = max(self.min_p, min(self.max_p,
-                                       0.33*self.hdp + 0.67*self.smp))
+                       0.33*self.hdp + 0.67*self.smp))
         self.I2,self.Q2,self.Re,self.Im = I2,Q2,Re,Im
         a = 2.0/(self.smp+1.0); return a, self.smp
 
@@ -1259,20 +1259,16 @@ class IncrementalCyberCycleV3(IncrementalCyberCycle):
             sl_d = entry * (1 - direction * self.p.get('sl_fixed_pct', 2.0) / 100)
             tp1 = entry * (1 + direction * self.p.get('tp1_fixed_pct', 1.0) / 100)
             tp2 = entry * (1 + direction * self.p.get('tp2_fixed_pct', 2.0) / 100)
-            tp3 = entry * (1 + direction * self.p.get('tp3_fixed_pct', 4.0) / 100)
-            tp1s = self.p.get('tp1_fixed_size', 0.4)
-            tp2s = self.p.get('tp2_fixed_size', 0.3)
+            tp1s = self.p.get('tp1_fixed_size', 0.35)
             sld = abs(entry - sl_d)
         else:
             sld = atr * self.p.get('sl_atr_mult', 1.5)
             sl_d = entry - direction * sld
-            tp1s = self.p.get('tp1_size', 0.4)
-            tp2s = self.p.get('tp2_size', 0.3)
+            tp1s = self.p.get('tp1_size', 0.6)
             tp1 = entry + direction * sld * self.p.get('tp1_rr', 2.0)
             tp2 = entry + direction * sld * self.p.get('tp2_rr', 3.0)
-            tp3 = entry + direction * sld * self.p.get('tp3_rr', 5.0)
 
-        tp3s = round(max(1.0 - tp1s - tp2s, 0.01), 8)
+        tp2s = round(1.0 - tp1s, 8)
         be_pct = self.p.get('be_pct', 1.0)
         be_t = entry * (1 + direction * be_pct / 100) if be_pct > 0 else 0.0
         utl = self.p.get('use_trailing', True)
@@ -1287,7 +1283,7 @@ class IncrementalCyberCycleV3(IncrementalCyberCycle):
         return Signal(
             direction=direction, confidence=conf,
             entry_price=entry, sl_price=sl_d,
-            tp_levels=[tp1, tp2, tp3], tp_sizes=[tp1s, tp2s, tp3s],
+            tp_levels=[tp1, tp2], tp_sizes=[tp1s, tp2s],
             leverage=self.p.get('leverage', 20.0),
             be_trigger=be_t, trailing=utl, trailing_distance=tdist,
             metadata={
@@ -1297,7 +1293,7 @@ class IncrementalCyberCycleV3(IncrementalCyberCycle):
                 'alpha': alpha, 'period': period,
                 'cycle': cyc, 'fisher': fish,
                 'sl_dist_atr': sld / atr if atr > 0 else 0,
-                'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
+                'tp1': tp1, 'tp2': tp2,
                 'be_pct': be_pct,
                 'trail_pct': tpull if utl else 0,
                 'partial_bar': not commit,

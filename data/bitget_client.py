@@ -432,13 +432,20 @@ class BitgetClient:
 
             if not candles:
                 consecutive_empty += 1
-                if consecutive_empty > 5:
+                # ◀ FIX: reintentar la misma página con backoff exponencial
+                # antes de contar como "empty" definitivo
+                if consecutive_empty <= 3:
+                    wait = 1.0 * (2 ** (consecutive_empty - 1))  # 1s, 2s, 4s
                     if self.verbose:
-                        print(f"\n      ❌ {consecutive_empty} consecutive empty pages, stopping")
+                        print(f"\\n      ⏳ Empty page, retry {consecutive_empty}/3 in {wait:.0f}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                elif consecutive_empty > 8:
+                    if self.verbose:
+                        print(f"\\n      ❌ {consecutive_empty} consecutive empty pages, stopping")
                     break
                 await asyncio.sleep(0.5)
                 continue
-
             consecutive_empty = 0
             all_candles.extend(candles)
 
@@ -493,7 +500,38 @@ class BitgetClient:
             return pd.DataFrame(columns=[
                 'timestamp', 'datetime', 'open', 'high', 'low', 'close', 'volume'
             ])
+        if all_candles and len(all_candles) > 10:
+            timestamps_dl = sorted(set(int(c[0]) for c in all_candles))
+            gaps_found = []
+            for i in range(1, len(timestamps_dl)):
+                diff = timestamps_dl[i] - timestamps_dl[i-1]
+                if diff > tf_ms * 2:
+                    gaps_found.append((timestamps_dl[i-1], timestamps_dl[i]))
 
+            if gaps_found and self.verbose:
+                print(f"\\n      🔍 {len(gaps_found)} gaps detectados, intentando rellenar...")
+
+            for gap_start, gap_end in gaps_found[:20]:  # máximo 20 gaps
+                for retry in range(3):
+                    try:
+                        gap_candles = await self.fetch_candles_page(
+                            symbol, timeframe,
+                            end_ms=gap_end,
+                            product_type=product_type,
+                            use_history=True,
+                        )
+                        if gap_candles:
+                            # Solo agregar las que caen dentro del gap
+                            for c in gap_candles:
+                                ct = int(c[0])
+                                if gap_start < ct < gap_end:
+                                    all_candles.append(c)
+                            break
+                    except Exception:
+                        await asyncio.sleep(1)
+
+            if gaps_found and self.verbose:
+                print(f"      ✅ Segundo pase completado")
         # Build DataFrame
         df = pd.DataFrame(all_candles, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'

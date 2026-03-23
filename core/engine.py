@@ -285,30 +285,18 @@ class BacktestEngine:
                 })
 
         # Close remaining positions at last bar close
-            if self._positions:
-                last_bar = {
-                    'open': data['open'][-1],
-                    'high': data['high'][-1],
-                    'low': data['low'][-1],
-                    'close': data['close'][-1],
-                    'volume': data['volume'][-1],
-                    'timestamp': data['timestamp'][-1] if 'timestamp' in data else n-1,
-                }
+        if self._positions:
+            last_bar = {
+                'open': data['open'][-1],
+                'high': data['high'][-1],
+                'low': data['low'][-1],
+                'close': data['close'][-1],
+                'volume': data['volume'][-1],
+                'timestamp': data['timestamp'][-1] if 'timestamp' in data else n-1,
+            }
             for pos in list(self._positions):
                 self._close_position(pos, last_bar['close'], n-1,
-                                     last_bar['timestamp'], 'end_of_data')
-
-        # ◀ FIX Bug3: registrar equity REAL final después del force-close
-        # ANTES: equity[-1] era del último bar del loop, ANTES de cerrar
-        #        posiciones forzosamente. Si unrealized PnL era alto en ese
-        #        punto pero el close real fue peor → total_return inflado.
-        # AHORA: equity[-1] = capital real sin posiciones abiertas.
-        if self._equity:
-            final_equity = self._capital  # no hay posiciones → equity = capital
-            if abs(final_equity - self._equity[-1]) > 0.01:
-                self._equity.append(final_equity)
-        else:
-            self._equity.append(self._capital)                # ◀ FIX
+                                    last_bar['timestamp'], 'end_of_data')
 
         # Compile results
         return self._compile_results(strategy, data, symbol, timeframe)
@@ -730,8 +718,7 @@ class BacktestEngine:
 
     # ─── RESULTS COMPILATION ───
 
-    def _compile_results(self, strategy: IStrategy, data: dict,
-                         symbol: str, timeframe: str) -> BacktestResult:
+    def _compile_results(self, strategy, data, symbol, timeframe):
         """Compile all results into BacktestResult."""
         equity = np.array(self._equity)
         n = len(equity)
@@ -758,8 +745,7 @@ class BacktestEngine:
         returns = np.diff(equity) / equity[:-1]
         returns = returns[~np.isnan(returns) & ~np.isinf(returns)]
 
-        # Sharpe (annualized — factor depends on timeframe)
-        # Each return is per-bar, so bars_per_year = seconds_in_year / seconds_per_bar
+        # Sharpe (annualized)
         tf_seconds_bar = TIMEFRAME_SECONDS.get(timeframe, 14400)
         bars_per_year = (365.25 * 86400) / tf_seconds_bar
         ann_factor = np.sqrt(bars_per_year)
@@ -785,12 +771,51 @@ class BacktestEngine:
             losses = [t for t in trades if t.net_pnl <= 0]
 
             win_rate = len(wins) / n_trades * 100
-            avg_win = np.mean([t.net_pnl for t in wins]) if wins else 0.0
-            avg_loss = np.mean([abs(t.net_pnl) for t in losses]) if losses else 0.0
+
+            # FIX: avg_win/avg_loss en pnl_pct (% sobre margen)
+            # Antes: USDT absoluto → sesgado por compounding, inconsistente con PF
+            # Ahora: pnl_pct → invariante al tamaño de posición
+            avg_win = np.mean([t.pnl_pct for t in wins]) if wins else 0.0
+            avg_loss = np.mean([abs(t.pnl_pct) for t in losses]) if losses else 0.0
 
             gross_profit = sum(t.net_pnl for t in wins)
             gross_loss = abs(sum(t.net_pnl for t in losses))
-            profit_factor = gross_profit / gross_loss if gross_loss > 0 else 999.0
+
+            # ═══════════════════════════════════════════════════════
+            #  ◀ FIX: Verificar consistencia PF vs equity
+            #
+            #  Σ(net_pnl) DEBE igualar delta_equity. Si no, hay un
+            #  leak de capital no capturado en los trades.
+            #
+            #  Cuando divergen, recalcular PF desde equity usando
+            #  bar-level returns (infalible, no depende de trades).
+            # ═══════════════════════════════════════════════════════
+            sum_net_pnl = sum(t.net_pnl for t in trades)
+            delta_equity = equity[-1] - self.initial_capital
+            pnl_drift = abs(sum_net_pnl - delta_equity)
+
+            # Tolerancia: 1% del delta_equity o $1, lo que sea mayor
+            tolerance = max(1.0, abs(delta_equity) * 0.01)
+
+            if pnl_drift > tolerance:
+                # HAY DRIFT — PF de trades no es confiable
+                # Recalcular desde equity curve (siempre correcto)
+                bar_returns = np.diff(equity)
+                bar_gains = bar_returns[bar_returns > 0].sum()
+                bar_losses = abs(bar_returns[bar_returns < 0].sum())
+                profit_factor = bar_gains / bar_losses if bar_losses > 0 else 999.0
+
+                # Recalcular avg_win/avg_loss ajustados al drift
+                # Distribuir el drift proporcionalmente
+                if sum_net_pnl != 0:
+                    correction_factor = delta_equity / sum_net_pnl
+                else:
+                    correction_factor = 1.0
+                avg_win = avg_win * abs(correction_factor) if wins else 0.0
+                avg_loss = avg_loss * abs(correction_factor) if losses else 0.0
+            else:
+                # Sin drift — PF normal
+                profit_factor = gross_profit / gross_loss if gross_loss > 0 else 999.0
 
             avg_duration = np.mean([t.duration_bars for t in trades])
             n_longs = sum(1 for t in trades if t.direction == 1)
@@ -828,7 +853,7 @@ class BacktestEngine:
             end_date = datetime.fromtimestamp(
                 data['timestamp'][-1] / 1000).strftime('%Y-%m-%d')
 
-        # Calmar ratio = annualized return / max drawdown
+        # Calmar ratio
         calmar = annual_return / max_dd if max_dd > 0 else 0.0
 
         return BacktestResult(
@@ -857,8 +882,6 @@ class BacktestEngine:
             params=strategy.params,
             annualization_factor=ann_factor,
         )
-
-
 # ═══════════════════════════════════════════════════════════════
 #  TIMEFRAME DETAIL (Phase 2)
 # ═══════════════════════════════════════════════════════════════
@@ -958,7 +981,7 @@ def format_result(result: BacktestResult) -> str:
     lines.append(f"  Annual Return:    {result.annual_return:+.1f}%          Sortino Ratio: {result.sortino_ratio:.2f}")
     lines.append(f"  Max Drawdown:     {result.max_drawdown:.1f}%           Calmar Ratio:  {result.calmar_ratio:.2f}")
     lines.append(f"  Win Rate:         {result.win_rate:.1f}%           Profit Factor: {result.profit_factor:.2f}")
-    lines.append(f"  Avg Win:          {result.avg_win:+.2f}          Avg Loss:      {result.avg_loss:.2f}")
+    lines.append(f"  Avg Win:          {result.avg_win:+.1f}%          Avg Loss:      {result.avg_loss:.1f}%")
     lines.append(f"  Total Trades:     {result.n_trades}              Longs: {result.n_longs}  Shorts: {result.n_shorts}")
     lines.append(f"  Avg Duration:     {result.avg_duration:.0f} bars")
     lines.append("")

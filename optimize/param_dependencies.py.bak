@@ -70,8 +70,8 @@ for _v in ALPHA_METHOD_PARAMS.values():
 # ═══════════════════════════════════════════════════════════════════
 
 SLTP_MODE_PARAMS: Dict[str, Set[str]] = {
-    'slatr_tprr': {'sl_atr_mult', 'tp1_rr', 'tp1_size', 'tp2_rr', 'tp2_size', 'tp3_rr'},
-    'sltp_fixed': {'sl_fixed_pct', 'tp1_fixed_pct', 'tp1_fixed_size', 'tp2_fixed_pct', 'tp2_fixed_size', 'tp3_fixed_pct'},
+    'slatr_tprr': {'sl_atr_mult', 'tp1_rr', 'tp1_size', 'tp2_rr'},
+    'sltp_fixed': {'sl_fixed_pct', 'tp1_fixed_pct', 'tp1_fixed_size', 'tp2_fixed_pct'},
 }
 
 # Union of ALL sltp-specific params
