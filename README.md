@@ -1,5 +1,7 @@
 # CryptoLab Engine v0.6 — Backtesting, Validación & Optimización
 
+*Módulo de Research & Backtesting del ecosistema **SignalGenerator**.*
+
 ---
 
 ## 1. Visión General
